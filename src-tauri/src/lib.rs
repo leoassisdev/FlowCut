@@ -23,6 +23,25 @@ pub struct ProcessingResult {
     pub size_bytes: u64,
 }
 
+/// Representa um corte na timeline semântica.
+/// start_ms e end_ms são posições no vídeo ORIGINAL (source).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TimelineCutInput {
+    pub start_ms: u64,
+    pub end_ms: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ExportRequest {
+    pub source_video_path: String,
+    pub cuts: Vec<TimelineCutInput>,   // apenas cortes do tipo 'keep'
+    pub output_path: String,
+    pub width: u32,
+    pub height: u32,
+    pub fps: f64,
+    pub quality: String,               // "high" | "medium" | "ultra"
+}
+
 // ─── Commands ────────────────────────────────────────────────────────────────
 
 /// Lê metadados reais de um arquivo de vídeo usando ffprobe.
@@ -98,12 +117,9 @@ fn get_video_metadata(file_path: String) -> Result<VideoMetadata, String> {
     })
 }
 
-/// Extrai o áudio do vídeo como WAV mono 16kHz.
-/// Formato otimizado para Whisper.
-/// output_dir: pasta onde salvar o .wav (ex: ~/Library/Application Support/FlowCut/projects/<id>)
+/// Extrai o áudio do vídeo como WAV mono 16kHz (otimizado para Whisper).
 #[tauri::command]
 fn extract_audio(video_path: String, output_dir: String) -> Result<ProcessingResult, String> {
-    // Garante que o diretório de saída existe
     std::fs::create_dir_all(&output_dir)
         .map_err(|e| format!("Failed to create output dir: {}", e))?;
 
@@ -114,15 +130,14 @@ fn extract_audio(video_path: String, output_dir: String) -> Result<ProcessingRes
 
     let output_path = format!("{}/{}.wav", output_dir, stem);
 
-    // ffmpeg extrai áudio: mono, 16kHz, PCM 16bit — formato ideal para Whisper
     let result = Command::new("ffmpeg")
         .args([
-            "-y",                    // sobrescreve sem perguntar
-            "-i", &video_path,       // input
-            "-vn",                   // sem vídeo
-            "-acodec", "pcm_s16le",  // PCM 16-bit little-endian
-            "-ar", "16000",          // 16kHz (Whisper otimizado)
-            "-ac", "1",              // mono
+            "-y",
+            "-i", &video_path,
+            "-vn",
+            "-acodec", "pcm_s16le",
+            "-ar", "16000",
+            "-ac", "1",
             &output_path,
         ])
         .output()
@@ -135,22 +150,13 @@ fn extract_audio(video_path: String, output_dir: String) -> Result<ProcessingRes
         ));
     }
 
-    let size_bytes = std::fs::metadata(&output_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
-
-    // Lê duração do WAV gerado
+    let size_bytes = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
     let duration_ms = get_audio_duration_ms(&output_path).unwrap_or(0);
 
-    Ok(ProcessingResult {
-        output_path,
-        duration_ms,
-        size_bytes,
-    })
+    Ok(ProcessingResult { output_path, duration_ms, size_bytes })
 }
 
-/// Gera proxy de baixa resolução (480p) para preview rápido no editor.
-/// Usa videotoolbox no Mac para aceleração por hardware quando disponível.
+/// Gera proxy de baixa resolução (480p) para preview rápido.
 #[tauri::command]
 fn generate_proxy(video_path: String, output_dir: String) -> Result<ProcessingResult, String> {
     std::fs::create_dir_all(&output_dir)
@@ -163,26 +169,164 @@ fn generate_proxy(video_path: String, output_dir: String) -> Result<ProcessingRe
 
     let output_path = format!("{}/{}_proxy.mp4", output_dir, stem);
 
-    // Tenta com videotoolbox (aceleração Apple Silicon) primeiro
-    // Se falhar, usa software encoding
     let result = run_proxy_ffmpeg(&video_path, &output_path, true);
-
     let result = if result.is_err() {
         run_proxy_ffmpeg(&video_path, &output_path, false)
     } else {
         result
     };
-
     result.map_err(|e| format!("generate_proxy failed: {}", e))?;
 
-    let size_bytes = std::fs::metadata(&output_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
-
+    let size_bytes = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
     let duration_ms = get_video_duration_ms(&output_path).unwrap_or(0);
 
+    Ok(ProcessingResult { output_path, duration_ms, size_bytes })
+}
+
+/// Exporta o vídeo final aplicando os cortes da SemanticTimeline.
+///
+/// Estratégia:
+/// 1. Para cada corte 'keep', extrai o trecho do vídeo original
+/// 2. Cria um arquivo de concatenação (concat list)
+/// 3. ffmpeg concatena todos os trechos em um único arquivo final
+/// 4. Aplica codec e qualidade conforme o perfil selecionado
+#[tauri::command]
+fn export_video(request: ExportRequest) -> Result<ProcessingResult, String> {
+    if request.cuts.is_empty() {
+        return Err("No cuts provided for export".to_string());
+    }
+
+    // Garante que o diretório de saída existe
+    if let Some(parent) = Path::new(&request.output_path).parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create output dir: {}", e))?;
+    }
+
+    // Cria diretório temporário para os segmentos
+    let tmp_dir = format!("{}_segments", request.output_path);
+    std::fs::create_dir_all(&tmp_dir)
+        .map_err(|e| format!("Failed to create tmp dir: {}", e))?;
+
+    // Extrai cada segmento 'keep' do vídeo original
+    let mut segment_paths: Vec<String> = Vec::new();
+
+    for (i, cut) in request.cuts.iter().enumerate() {
+        let seg_path = format!("{}/seg_{:04}.mp4", tmp_dir, i);
+        let start_secs = cut.start_ms as f64 / 1000.0;
+        let duration_secs = (cut.end_ms - cut.start_ms) as f64 / 1000.0;
+
+        if duration_secs <= 0.0 {
+            continue;
+        }
+
+        let result = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-ss", &format!("{:.3}", start_secs),
+                "-i", &request.source_video_path,
+                "-t", &format!("{:.3}", duration_secs),
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "-crf", "18",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-avoid_negative_ts", "make_zero",
+                &seg_path,
+            ])
+            .output()
+            .map_err(|e| format!("Failed to extract segment {}: {}", i, e))?;
+
+        if !result.status.success() {
+            // Limpa tmp e retorna erro
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            return Err(format!(
+                "ffmpeg segment {} error: {}",
+                i,
+                String::from_utf8_lossy(&result.stderr)
+            ));
+        }
+
+        segment_paths.push(seg_path);
+    }
+
+    if segment_paths.is_empty() {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        return Err("No valid segments extracted".to_string());
+    }
+
+    // Se só tem um segmento, move direto para o output
+    if segment_paths.len() == 1 {
+        let (crf, preset) = quality_params(&request.quality);
+        let result = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-i", &segment_paths[0],
+                "-c:v", "libx264",
+                "-preset", preset,
+                "-crf", crf,
+                "-c:a", "aac",
+                "-b:a", "192k",
+                &request.output_path,
+            ])
+            .output()
+            .map_err(|e| format!("Failed to finalize export: {}", e))?;
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+
+        if !result.status.success() {
+            return Err(format!(
+                "ffmpeg finalize error: {}",
+                String::from_utf8_lossy(&result.stderr)
+            ));
+        }
+    } else {
+        // Cria concat list
+        let concat_list_path = format!("{}/concat.txt", tmp_dir);
+        let concat_content = segment_paths
+            .iter()
+            .map(|p| format!("file '{}'\n", p))
+            .collect::<String>();
+
+        std::fs::write(&concat_list_path, concat_content)
+            .map_err(|e| format!("Failed to write concat list: {}", e))?;
+
+        let (crf, preset) = quality_params(&request.quality);
+
+        // Concatena todos os segmentos
+        let result = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", &concat_list_path,
+                "-c:v", "libx264",
+                "-preset", preset,
+                "-crf", crf,
+                "-c:a", "aac",
+                "-b:a", "192k",
+                &request.output_path,
+            ])
+            .output()
+            .map_err(|e| format!("Failed to concatenate segments: {}", e))?;
+
+        // Limpa tmp
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+
+        if !result.status.success() {
+            return Err(format!(
+                "ffmpeg concat error: {}",
+                String::from_utf8_lossy(&result.stderr)
+            ));
+        }
+    }
+
+    let size_bytes = std::fs::metadata(&request.output_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let duration_ms = get_video_duration_ms(&request.output_path).unwrap_or(0);
+
     Ok(ProcessingResult {
-        output_path,
+        output_path: request.output_path,
         duration_ms,
         size_bytes,
     })
@@ -227,6 +371,14 @@ fn parse_fps(fps_str: &str) -> f64 {
     }
 }
 
+fn quality_params(quality: &str) -> (&'static str, &'static str) {
+    match quality {
+        "ultra"  => ("16", "slow"),
+        "high"   => ("20", "medium"),
+        _        => ("23", "fast"),   // medium / default
+    }
+}
+
 fn run_proxy_ffmpeg(input: &str, output: &str, use_hw: bool) -> Result<(), String> {
     let mut args = vec![
         "-y".to_string(),
@@ -234,7 +386,6 @@ fn run_proxy_ffmpeg(input: &str, output: &str, use_hw: bool) -> Result<(), Strin
     ];
 
     if use_hw {
-        // Videotoolbox: encoder H.264 acelerado por hardware no Mac
         args.extend([
             "-vf".to_string(), "scale=-2:480".to_string(),
             "-c:v".to_string(), "h264_videotoolbox".to_string(),
@@ -243,7 +394,6 @@ fn run_proxy_ffmpeg(input: &str, output: &str, use_hw: bool) -> Result<(), Strin
             "-b:a".to_string(), "128k".to_string(),
         ]);
     } else {
-        // Software fallback
         args.extend([
             "-vf".to_string(), "scale=-2:480".to_string(),
             "-c:v".to_string(), "libx264".to_string(),
@@ -280,7 +430,7 @@ fn get_audio_duration_ms(path: &str) -> Option<u64> {
 }
 
 fn get_video_duration_ms(path: &str) -> Option<u64> {
-    get_audio_duration_ms(path) // mesma lógica
+    get_audio_duration_ms(path)
 }
 
 // ─── App Entry ───────────────────────────────────────────────────────────────
@@ -305,6 +455,7 @@ pub fn run() {
             check_ffmpeg,
             extract_audio,
             generate_proxy,
+            export_video,
         ])
         .run(tauri::generate_context!())
         .expect("error while running FlowCut");
