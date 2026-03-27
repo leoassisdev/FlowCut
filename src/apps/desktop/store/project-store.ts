@@ -5,37 +5,26 @@
  */
 
 import { create } from 'zustand';
-import type { VideoProject, PipelineState, StylePreset, ProcessingJob, CaptionStyle, SourceVideo } from '@/packages/shared-types';
+import type {
+  VideoProject, PipelineState, StylePreset,
+  ProcessingJob, CaptionStyle, SourceVideo
+} from '@/packages/shared-types';
 import { MOCK_PROJECT, MOCK_BROLL_CUES, MOCK_CAPTION_TRACK } from '@/apps/desktop/mocks/mock-data';
-import { getVideoMetadata } from '@/apps/desktop/services/tauri-bridge';
+import { getVideoMetadata, extractAudio, generateProxy } from '@/apps/desktop/services/tauri-bridge';
 import {
-  type CommandHistory,
-  createCommandHistory,
-  pushCommand,
-  undoCommand,
-  redoCommand,
-  canUndo,
-  canRedo,
-  createRemoveWordCommand,
-  createRemoveSegmentCommand,
-  createApplyPresetCommand,
-  createUpdateCaptionsCommand,
-  createUpdateCaptionStyleCommand,
-  type Command,
+  type CommandHistory, createCommandHistory, pushCommand,
+  undoCommand, redoCommand, canUndo, canRedo,
+  createRemoveWordCommand, createRemoveSegmentCommand,
+  createApplyPresetCommand, createUpdateCaptionsCommand,
+  createUpdateCaptionStyleCommand, type Command,
 } from '@/apps/desktop/core/command-system';
 import {
-  type EditorMachineState,
-  createEditorMachine,
-  transition,
-  canTransition,
-  type EditorEvent,
+  type EditorMachineState, createEditorMachine,
+  transition, canTransition, type EditorEvent,
 } from '@/apps/desktop/core/editor-state-machine';
 import {
-  type AutosaveState,
-  createAutosaveState,
-  saveSnapshot,
-  restoreSnapshot,
-  createAutosaveDebounce,
+  type AutosaveState, createAutosaveState,
+  saveSnapshot, restoreSnapshot, createAutosaveDebounce,
 } from '@/apps/desktop/core/autosave';
 import { logger } from '@/apps/desktop/core/logger';
 import { enqueueJob, cancelJob, retryJob } from '@/apps/desktop/core/job-queue';
@@ -48,19 +37,29 @@ function generateProjectId(): string {
   return `project-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
+/**
+ * Retorna o diretório de trabalho do projeto.
+ * Em produção: ~/Library/Application Support/FlowCut/projects/<id>
+ * Em mock: /tmp/flowcut/<id>
+ */
+function getProjectDir(projectId: string): string {
+  const home = (window as any).__TAURI_INTERNALS__
+    ? `${(window as any).__TAURI_INTERNALS__.metadata?.currentDir ?? '/tmp'}`
+    : '/tmp';
+  return `${home}/flowcut/projects/${projectId}`;
+}
+
 // ─── Store Interface ──────────────────────────────────────────────────────────
 
 interface ProjectStore {
-  // ─── Project State ──────────────
   project: VideoProject | null;
   isLoading: boolean;
   importError: string | null;
+  importProgress: string | null;
 
-  // ─── Editor State Machine ──────
   editorMachine: EditorMachineState;
   sendEditorEvent: (event: EditorEvent) => void;
 
-  // ─── Command History (Undo/Redo) ──
   commandHistory: CommandHistory;
   executeCommand: (command: Command) => void;
   undo: () => void;
@@ -68,13 +67,11 @@ interface ProjectStore {
   canUndo: () => boolean;
   canRedo: () => boolean;
 
-  // ─── Autosave ──────────────────
   autosave: AutosaveState;
   markDirty: () => void;
   saveNow: (label?: string) => void;
   restoreFromSnapshot: (snapshotId: string) => void;
 
-  // ─── Project Actions ───────────
   loadProject: (id: string) => void;
   importVideoFromPath: (filePath: string) => Promise<void>;
   removeWord: (wordId: string) => void;
@@ -83,14 +80,10 @@ interface ProjectStore {
   applyPreset: (preset: StylePreset) => void;
   setState: (state: PipelineState) => void;
 
-  // ─── Captions ──────────────────
   generateCaptions: () => void;
   updateCaptionStyle: (style: CaptionStyle) => void;
-
-  // ─── B-Roll ────────────────────
   generateBrollCues: () => void;
 
-  // ─── Jobs ──────────────────────
   enqueueJob: (type: ProcessingJob['type']) => string;
   cancelJob: (id: string) => void;
   retryJob: (id: string) => void;
@@ -103,6 +96,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   project: null,
   isLoading: false,
   importError: null,
+  importProgress: null,
   editorMachine: createEditorMachine(),
   commandHistory: createCommandHistory(),
   autosave: createAutosaveState(),
@@ -116,11 +110,11 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       logger.info('editor-sm', `${machine.state} → ${next.state} [${event.type}]`);
       set({ editorMachine: next });
     } else {
-      logger.warn('editor-sm', `Blocked transition: ${machine.state} + ${event.type}`);
+      logger.warn('editor-sm', `Blocked: ${machine.state} + ${event.type}`);
     }
   },
 
-  // ─── Command System / Undo-Redo ───────────────────────────────────
+  // ─── Command System ───────────────────────────────────────────────
 
   executeCommand: (command: Command) => {
     const project = get().project;
@@ -157,16 +151,13 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
   markDirty: () => {
     set({ autosave: { ...get().autosave, isDirty: true } });
-    autosaveDebounce.trigger(() => {
-      get().saveNow('Autosave');
-    });
+    autosaveDebounce.trigger(() => get().saveNow('Autosave'));
   },
 
   saveNow: (label = 'Manual save') => {
     const project = get().project;
     if (!project) return;
-    const newState = saveSnapshot(get().autosave, project, label);
-    set({ autosave: newState });
+    set({ autosave: saveSnapshot(get().autosave, project, label) });
   },
 
   restoreFromSnapshot: (snapshotId: string) => {
@@ -193,27 +184,30 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   },
 
   /**
-   * Importa um vídeo real a partir do path selecionado pelo file picker.
-   * Lê metadados reais via ffprobe (Tauri/Rust).
-   * Cria um VideoProject real com SourceVideo populado com dados do arquivo.
-   * O transcript ainda é mock — será substituído quando a transcrição for implementada.
+   * Pipeline de importação real:
+   * 1. get_video_metadata  → lê duração, resolução, fps, codec via ffprobe
+   * 2. extract_audio       → extrai WAV 16kHz mono para Whisper
+   * 3. generate_proxy      → gera MP4 480p para preview rápido
+   *
+   * O transcript ainda é mock — será substituído quando Whisper for integrado.
    */
   importVideoFromPath: async (filePath: string) => {
-    set({ isLoading: true, importError: null });
+    set({ isLoading: true, importError: null, importProgress: 'Reading metadata...' });
     get().sendEditorEvent({ type: 'LOAD_PROJECT', projectId: 'new' });
-    logger.info('project', `Importing video from: ${filePath}`);
+    logger.info('project', `Importing: ${filePath}`);
 
     try {
-      // Lê metadados reais do arquivo via Tauri/ffprobe
+      // ── Step 1: Metadados ──────────────────────────────────────────
       const metadata = await getVideoMetadata(filePath);
+      if (!metadata) throw new Error('Failed to read video metadata');
 
-      if (!metadata) {
-        throw new Error('Failed to read video metadata');
-      }
+      logger.info('project', `Metadata: ${metadata.file_name} ${metadata.width}x${metadata.height} ${metadata.duration_ms}ms`);
 
-      logger.info('project', `Metadata read: ${metadata.file_name} ${metadata.width}x${metadata.height} ${metadata.duration_ms}ms`);
+      const projectId = generateProjectId();
+      const projectDir = getProjectDir(projectId);
+      const projectName = metadata.file_name.replace(/\.[^.]+$/, '');
 
-      // Monta o SourceVideo com dados reais
+      // Cria projeto com metadados reais — proxy e audio ainda null
       const sourceVideo: SourceVideo = {
         id: `source-${Date.now()}`,
         filePath: metadata.file_path,
@@ -224,16 +218,11 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         fps: metadata.fps,
         codec: metadata.codec,
         sizeBytes: metadata.size_bytes,
-        proxyPath: null,   // será gerado pela engine local futuramente
-        audioPath: null,   // será extraído pela engine local futuramente
+        proxyPath: null,
+        audioPath: null,
       };
 
-      const projectId = generateProjectId();
-      const projectName = metadata.file_name.replace(/\.[^.]+$/, '');
-
-      // Cria o projeto com SourceVideo real + transcript mock
-      // O transcript mock será substituído quando Whisper for integrado
-      const newProject: VideoProject = {
+      let newProject: VideoProject = {
         ...structuredClone(MOCK_PROJECT),
         id: projectId,
         name: projectName,
@@ -243,19 +232,61 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         updatedAt: new Date().toISOString(),
       };
 
-      set({ project: newProject, isLoading: false });
+      // Coloca projeto no store imediatamente — usuário já pode ver o editor
+      set({ project: newProject, importProgress: 'Extracting audio...' });
       get().sendEditorEvent({ type: 'PROJECT_LOADED' });
       get().sendEditorEvent({ type: 'START_EDITING' });
-      get().saveNow('Video imported');
 
-      logger.info('project', `Project created: ${projectId} — ${projectName} (${metadata.width}x${metadata.height}, ${Math.round(metadata.duration_ms / 1000)}s)`);
+      // ── Step 2: Extrai áudio (background) ─────────────────────────
+      logger.info('project', 'Extracting audio...');
+      set({ project: { ...newProject, state: 'AUDIO_EXTRACTED' } });
+
+      const audioResult = await extractAudio(filePath, projectDir);
+
+      if (audioResult) {
+        logger.info('project', `Audio extracted: ${audioResult.output_path} (${Math.round(audioResult.size_bytes / 1024)}KB)`);
+        newProject = {
+          ...get().project!,
+          state: 'AUDIO_EXTRACTED',
+          sourceVideo: { ...sourceVideo, audioPath: audioResult.output_path },
+        };
+        set({ project: newProject, importProgress: 'Generating proxy...' });
+      } else {
+        logger.info('project', 'Audio extraction failed — continuing without audio');
+      }
+
+      // ── Step 3: Gera proxy (background) ───────────────────────────
+      logger.info('project', 'Generating proxy...');
+      const proxyResult = await generateProxy(filePath, projectDir);
+
+      if (proxyResult) {
+        logger.info('project', `Proxy generated: ${proxyResult.output_path} (${Math.round(proxyResult.size_bytes / 1024)}KB)`);
+        newProject = {
+          ...get().project!,
+          state: 'PROXY_GENERATED',
+          sourceVideo: {
+            ...get().project!.sourceVideo!,
+            proxyPath: proxyResult.output_path,
+          },
+        };
+        set({ project: newProject });
+      } else {
+        logger.info('project', 'Proxy generation failed — continuing without proxy');
+      }
+
+      // ── Finaliza ──────────────────────────────────────────────────
+      set({ isLoading: false, importProgress: null });
+      get().saveNow('Video imported');
+      logger.info('project', `Import complete: ${projectId} — ${projectName}`);
+
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       logger.info('project', `Import failed: ${message}`);
-      set({ isLoading: false, importError: message });
-      get().sendEditorEvent({ type: 'LOAD_FAILED' } as any);
+      set({ isLoading: false, importProgress: null, importError: message });
     }
   },
+
+  // ─── Edit Actions ─────────────────────────────────────────────────
 
   removeWord: (wordId: string) => {
     const project = get().project;
@@ -265,16 +296,14 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       const w = seg.words.find((w) => w.id === wordId);
       if (w) { wordText = w.word; break; }
     }
-    const command = createRemoveWordCommand(wordId, wordText);
-    get().executeCommand(command);
+    get().executeCommand(createRemoveWordCommand(wordId, wordText));
   },
 
   removeSegment: (segmentId: string) => {
     const project = get().project;
     if (!project?.transcript) return;
     const seg = project.transcript.segments.find((s) => s.id === segmentId);
-    const command = createRemoveSegmentCommand(segmentId, seg?.text ?? '');
-    get().executeCommand(command);
+    get().executeCommand(createRemoveSegmentCommand(segmentId, seg?.text ?? ''));
   },
 
   rebuildTimeline: () => {
@@ -300,7 +329,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       return cut;
     });
 
-    logger.info('timeline', `Rebuilt: ${newCuts.length} cuts, ${Math.round(cursor / 1000)}s total`);
+    logger.info('timeline', `Rebuilt: ${newCuts.length} cuts, ${Math.round(cursor / 1000)}s`);
     set({
       project: {
         ...project,
@@ -317,8 +346,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   applyPreset: (preset: StylePreset) => {
     const project = get().project;
     if (!project) return;
-    const command = createApplyPresetCommand(preset, project.appliedPreset);
-    get().executeCommand(command);
+    get().executeCommand(createApplyPresetCommand(preset, project.appliedPreset));
   },
 
   setState: (state: PipelineState) => {
@@ -332,16 +360,14 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   generateCaptions: () => {
     const project = get().project;
     if (!project) return;
-    const command = createUpdateCaptionsCommand(MOCK_CAPTION_TRACK, project.captionTrack);
-    get().executeCommand(command);
+    get().executeCommand(createUpdateCaptionsCommand(MOCK_CAPTION_TRACK, project.captionTrack));
     logger.info('captions', 'Captions generated (MOCK)');
   },
 
   updateCaptionStyle: (style: CaptionStyle) => {
     const project = get().project;
     if (!project?.captionTrack) return;
-    const command = createUpdateCaptionStyleCommand(style, project.captionTrack.style);
-    get().executeCommand(command);
+    get().executeCommand(createUpdateCaptionStyleCommand(style, project.captionTrack.style));
   },
 
   // ─── B-Roll ───────────────────────────────────────────────────────

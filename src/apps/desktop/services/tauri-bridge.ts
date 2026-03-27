@@ -1,9 +1,8 @@
 /**
  * @module tauri-bridge
  * Ponte entre o frontend React e o backend Tauri (Rust).
- *
- * REGRA: Nenhum outro módulo do desktop chama @tauri-apps diretamente.
- * Toda comunicação com o Tauri passa por aqui.
+ * Toda comunicação com o Tauri passa por aqui — nenhum outro módulo
+ * importa @tauri-apps diretamente.
  */
 
 const IS_TAURI = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -26,6 +25,12 @@ export interface VideoMetadata {
   size_bytes: number;
 }
 
+export interface ProcessingResult {
+  output_path: string;
+  duration_ms: number;
+  size_bytes: number;
+}
+
 export interface SystemInfo {
   platform: string;
   arch: string;
@@ -41,10 +46,6 @@ export interface FfmpegStatus {
 
 // ─── File Dialog ─────────────────────────────────────────────────────────────
 
-/**
- * Abre o file picker nativo do macOS para selecionar um vídeo.
- * Retorna o path do arquivo selecionado ou null se cancelado.
- */
 export async function pickVideoFile(): Promise<VideoFileInfo | null> {
   if (!IS_TAURI) {
     console.warn('[tauri-bridge] pickVideoFile: fora do Tauri, retornando mock');
@@ -72,42 +73,84 @@ export async function pickVideoFile(): Promise<VideoFileInfo | null> {
 
 // ─── Video Metadata ──────────────────────────────────────────────────────────
 
-/**
- * Lê metadados reais de um arquivo de vídeo via ffprobe (Rust).
- * Retorna duração, dimensões, fps, codec e tamanho reais.
- */
 export async function getVideoMetadata(filePath: string): Promise<VideoMetadata | null> {
   if (!IS_TAURI) {
-    // Mock para desenvolvimento sem Tauri
     return {
       file_path: filePath,
       file_name: filePath.split('/').pop() ?? 'demo.mp4',
       duration_ms: 185000,
-      width: 1920,
-      height: 1080,
-      fps: 30,
-      codec: 'h264',
-      size_bytes: 245_000_000,
+      width: 1920, height: 1080, fps: 30,
+      codec: 'h264', size_bytes: 245_000_000,
     };
   }
 
   try {
     const { invoke } = await import('@tauri-apps/api/core');
-    const metadata = await invoke<VideoMetadata>('get_video_metadata', {
-      filePath,
-    });
-    return metadata;
+    return await invoke<VideoMetadata>('get_video_metadata', { filePath });
   } catch (error) {
     console.error('[tauri-bridge] getVideoMetadata error:', error);
     return null;
   }
 }
 
-// ─── FFmpeg Check ────────────────────────────────────────────────────────────
+// ─── Audio Extraction ────────────────────────────────────────────────────────
 
 /**
- * Verifica se ffmpeg/ffprobe estão instalados no sistema.
+ * Extrai o áudio do vídeo como WAV mono 16kHz (otimizado para Whisper).
+ * outputDir: pasta de saída (ex: ~/Library/Application Support/FlowCut/projects/<id>)
  */
+export async function extractAudio(
+  videoPath: string,
+  outputDir: string
+): Promise<ProcessingResult | null> {
+  if (!IS_TAURI) {
+    console.warn('[tauri-bridge] extractAudio: mock mode');
+    return {
+      output_path: '/mock/audio/demo.wav',
+      duration_ms: 185000,
+      size_bytes: 5_000_000,
+    };
+  }
+
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return await invoke<ProcessingResult>('extract_audio', { videoPath, outputDir });
+  } catch (error) {
+    console.error('[tauri-bridge] extractAudio error:', error);
+    return null;
+  }
+}
+
+// ─── Proxy Generation ────────────────────────────────────────────────────────
+
+/**
+ * Gera um proxy 480p do vídeo para preview rápido no editor.
+ * Usa videotoolbox (Apple Silicon) automaticamente quando disponível.
+ */
+export async function generateProxy(
+  videoPath: string,
+  outputDir: string
+): Promise<ProcessingResult | null> {
+  if (!IS_TAURI) {
+    console.warn('[tauri-bridge] generateProxy: mock mode');
+    return {
+      output_path: '/mock/proxy/demo_proxy.mp4',
+      duration_ms: 185000,
+      size_bytes: 15_000_000,
+    };
+  }
+
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return await invoke<ProcessingResult>('generate_proxy', { videoPath, outputDir });
+  } catch (error) {
+    console.error('[tauri-bridge] generateProxy error:', error);
+    return null;
+  }
+}
+
+// ─── FFmpeg Check ────────────────────────────────────────────────────────────
+
 export async function checkFfmpeg(): Promise<FfmpegStatus> {
   if (!IS_TAURI) {
     return { ffmpeg: false, ffprobe: false, ready: false, install_hint: 'brew install ffmpeg' };
