@@ -7,10 +7,12 @@
 import { create } from 'zustand';
 import type {
   VideoProject, PipelineState, StylePreset,
-  ProcessingJob, CaptionStyle, SourceVideo
+  ProcessingJob, CaptionStyle, SourceVideo, Transcript,
+  SemanticTimeline, TimelineCut,
 } from '@/packages/shared-types';
 import { MOCK_PROJECT, MOCK_BROLL_CUES, MOCK_CAPTION_TRACK } from '@/apps/desktop/mocks/mock-data';
 import { getVideoMetadata, extractAudio, generateProxy } from '@/apps/desktop/services/tauri-bridge';
+import { transcribeAudio, checkEngineHealth } from '@/apps/desktop/services/local-api-client';
 import {
   type CommandHistory, createCommandHistory, pushCommand,
   undoCommand, redoCommand, canUndo, canRedo,
@@ -37,16 +39,35 @@ function generateProjectId(): string {
   return `project-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
-/**
- * Retorna o diretório de trabalho do projeto.
- * Em produção: ~/Library/Application Support/FlowCut/projects/<id>
- * Em mock: /tmp/flowcut/<id>
- */
 function getProjectDir(projectId: string): string {
-  const home = (window as any).__TAURI_INTERNALS__
-    ? `${(window as any).__TAURI_INTERNALS__.metadata?.currentDir ?? '/tmp'}`
-    : '/tmp';
-  return `${home}/flowcut/projects/${projectId}`;
+  return `/tmp/flowcut/projects/${projectId}`;
+}
+
+/**
+ * Constrói a SemanticTimeline inicial a partir do transcript.
+ * Cada segmento vira um TimelineCut do tipo 'keep'.
+ */
+function buildInitialTimeline(transcript: Transcript): SemanticTimeline {
+  let cursor = 0;
+  const cuts: TimelineCut[] = transcript.segments.map((seg) => {
+    const cut: TimelineCut = {
+      id: `cut-${seg.id}`,
+      startMs: cursor,
+      endMs: cursor + (seg.endMs - seg.startMs),
+      type: 'keep',
+      sourceSegmentId: seg.id,
+      label: seg.text.slice(0, 40) + (seg.text.length > 40 ? '…' : ''),
+    };
+    cursor = cut.endMs + 50;
+    return cut;
+  });
+
+  return {
+    id: `timeline-${transcript.id}`,
+    cuts,
+    totalDurationMs: cursor,
+    originalDurationMs: cursor,
+  };
 }
 
 // ─── Store Interface ──────────────────────────────────────────────────────────
@@ -184,12 +205,12 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   },
 
   /**
-   * Pipeline de importação real:
-   * 1. get_video_metadata  → lê duração, resolução, fps, codec via ffprobe
-   * 2. extract_audio       → extrai WAV 16kHz mono para Whisper
-   * 3. generate_proxy      → gera MP4 480p para preview rápido
-   *
-   * O transcript ainda é mock — será substituído quando Whisper for integrado.
+   * Pipeline completo de importação:
+   * 1. get_video_metadata  → metadados reais via ffprobe
+   * 2. extract_audio       → WAV 16kHz para Whisper
+   * 3. generate_proxy      → MP4 480p para preview
+   * 4. transcribeAudio     → transcrição real via engine Python + whisper.cpp
+   * 5. buildInitialTimeline → timeline semântica inicial
    */
   importVideoFromPath: async (filePath: string) => {
     set({ isLoading: true, importError: null, importProgress: 'Reading metadata...' });
@@ -197,17 +218,16 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     logger.info('project', `Importing: ${filePath}`);
 
     try {
-      // ── Step 1: Metadados ──────────────────────────────────────────
+      // ── Step 1: Metadados ─────────────────────────────────────────
       const metadata = await getVideoMetadata(filePath);
       if (!metadata) throw new Error('Failed to read video metadata');
-
-      logger.info('project', `Metadata: ${metadata.file_name} ${metadata.width}x${metadata.height} ${metadata.duration_ms}ms`);
 
       const projectId = generateProjectId();
       const projectDir = getProjectDir(projectId);
       const projectName = metadata.file_name.replace(/\.[^.]+$/, '');
 
-      // Cria projeto com metadados reais — proxy e audio ainda null
+      logger.info('project', `Metadata OK: ${metadata.file_name} ${metadata.width}x${metadata.height} ${metadata.duration_ms}ms`);
+
       const sourceVideo: SourceVideo = {
         id: `source-${Date.now()}`,
         filePath: metadata.file_path,
@@ -222,46 +242,48 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         audioPath: null,
       };
 
-      let newProject: VideoProject = {
+      // Cria projeto inicial — usuário já vê o editor
+      let currentProject: VideoProject = {
         ...structuredClone(MOCK_PROJECT),
         id: projectId,
         name: projectName,
         state: 'IMPORTED',
         sourceVideo,
+        transcript: null,
+        semanticTimeline: null,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
 
-      // Coloca projeto no store imediatamente — usuário já pode ver o editor
-      set({ project: newProject, importProgress: 'Extracting audio...' });
+      set({ project: currentProject });
       get().sendEditorEvent({ type: 'PROJECT_LOADED' });
       get().sendEditorEvent({ type: 'START_EDITING' });
 
-      // ── Step 2: Extrai áudio (background) ─────────────────────────
+      // ── Step 2: Extrai áudio ──────────────────────────────────────
+      set({ importProgress: 'Extracting audio...' });
       logger.info('project', 'Extracting audio...');
-      set({ project: { ...newProject, state: 'AUDIO_EXTRACTED' } });
 
       const audioResult = await extractAudio(filePath, projectDir);
 
       if (audioResult) {
-        logger.info('project', `Audio extracted: ${audioResult.output_path} (${Math.round(audioResult.size_bytes / 1024)}KB)`);
-        newProject = {
+        logger.info('project', `Audio OK: ${audioResult.output_path}`);
+        currentProject = {
           ...get().project!,
           state: 'AUDIO_EXTRACTED',
           sourceVideo: { ...sourceVideo, audioPath: audioResult.output_path },
         };
-        set({ project: newProject, importProgress: 'Generating proxy...' });
-      } else {
-        logger.info('project', 'Audio extraction failed — continuing without audio');
+        set({ project: currentProject });
       }
 
-      // ── Step 3: Gera proxy (background) ───────────────────────────
+      // ── Step 3: Proxy ─────────────────────────────────────────────
+      set({ importProgress: 'Generating preview...' });
       logger.info('project', 'Generating proxy...');
+
       const proxyResult = await generateProxy(filePath, projectDir);
 
       if (proxyResult) {
-        logger.info('project', `Proxy generated: ${proxyResult.output_path} (${Math.round(proxyResult.size_bytes / 1024)}KB)`);
-        newProject = {
+        logger.info('project', `Proxy OK: ${proxyResult.output_path}`);
+        currentProject = {
           ...get().project!,
           state: 'PROXY_GENERATED',
           sourceVideo: {
@@ -269,9 +291,43 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
             proxyPath: proxyResult.output_path,
           },
         };
-        set({ project: newProject });
-      } else {
-        logger.info('project', 'Proxy generation failed — continuing without proxy');
+        set({ project: currentProject });
+      }
+
+      // ── Step 4: Transcrição real ──────────────────────────────────
+      const audioPath = get().project?.sourceVideo?.audioPath;
+
+      if (audioPath) {
+        set({ importProgress: 'Transcribing... (this may take a moment)', project: { ...get().project!, state: 'TRANSCRIBING' } });
+        logger.info('project', 'Starting transcription...');
+
+        // Verifica se engine está rodando
+        const engineOk = await checkEngineHealth();
+
+        if (!engineOk) {
+          logger.info('project', 'Engine not running — keeping mock transcript');
+          set({ importProgress: null });
+        } else {
+          const transcript = await transcribeAudio(projectId, audioPath, 'pt');
+
+          if (transcript) {
+            logger.info('project', `Transcription OK: ${transcript.segments.length} segments, ${transcript.segments.reduce((acc, s) => acc + s.words.length, 0)} words`);
+
+            // Constrói timeline real a partir do transcript
+            const timeline = buildInitialTimeline(transcript);
+
+            currentProject = {
+              ...get().project!,
+              state: 'ALIGNED',
+              transcript,
+              semanticTimeline: timeline,
+            };
+            set({ project: currentProject });
+          } else {
+            logger.info('project', 'Transcription failed — keeping mock transcript');
+            set({ project: { ...get().project!, state: 'TRANSCRIBED' } });
+          }
+        }
       }
 
       // ── Finaliza ──────────────────────────────────────────────────
@@ -317,11 +373,11 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     const newCuts = keptSegments.map((seg) => {
       const keptWords = seg.words.filter((w) => !w.isRemoved);
       const duration = keptWords.reduce((sum, w) => sum + (w.endMs - w.startMs), 0);
-      const cut = {
+      const cut: TimelineCut = {
         id: `cut-${seg.id}`,
         startMs: cursor,
         endMs: cursor + duration,
-        type: 'keep' as const,
+        type: 'keep',
         sourceSegmentId: seg.id,
         label: keptWords.map((w) => w.word).join(' ').slice(0, 40) + '…',
       };
