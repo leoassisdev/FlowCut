@@ -1,7 +1,9 @@
-import { Play, Pause, SkipBack, SkipForward, Maximize2, Volume2, Scissors } from 'lucide-react';
+import { Play, Pause, SkipBack, SkipForward, Maximize2, Volume2, VolumeX, Scissors } from 'lucide-react';
 import type { SourceVideo } from '@/packages/shared-types';
 import { formatDuration } from '@/apps/desktop/services/mappers';
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
+
+const IS_TAURI = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
 interface Props {
   sourceVideo: SourceVideo | null;
@@ -9,19 +11,67 @@ interface Props {
 
 export default function PreviewPlayer({ sourceVideo }: Props) {
   const [isPlaying, setIsPlaying] = useState(false);
-  const [progress, setProgress] = useState(0.33);
-  const [isDragging, setIsDragging] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [currentMs, setCurrentMs] = useState(0);
+  const [isMuted, setIsMuted] = useState(false);
+  const [playbackRate, setPlaybackRate] = useState(1);
+  const [videoSrc, setVideoSrc] = useState<string | null>(null);
+  
+  const videoRef = useRef<HTMLVideoElement>(null);
   const scrubRef = useRef<HTMLDivElement>(null);
 
-  const totalMs = sourceVideo?.durationMs ?? 185000;
-  const currentMs = Math.round(progress * totalMs);
+  const totalMs = sourceVideo?.durationMs ?? 0;
 
+  // 1. Converte o caminho do arquivo local para uma URL que o Tauri entenda
+  useEffect(() => {
+    if (!sourceVideo?.proxyPath) {
+      setVideoSrc(null);
+      return;
+    }
+    if (IS_TAURI) {
+      import('@tauri-apps/api/core').then(({ convertFileSrc }) => {
+        setVideoSrc(convertFileSrc(sourceVideo.proxyPath!));
+      });
+    } else {
+      setVideoSrc(sourceVideo.proxyPath);
+    }
+  }, [sourceVideo?.proxyPath]);
+
+  // 2. Sincroniza o tempo do vídeo com a nossa barrinha
+  const handleTimeUpdate = () => {
+    if (!videoRef.current) return;
+    const timeMs = videoRef.current.currentTime * 1000;
+    setCurrentMs(timeMs);
+    if (totalMs > 0) {
+      setProgress(timeMs / totalMs);
+    }
+  };
+
+  // 3. Permite clicar na barra para avançar/voltar o vídeo
   const handleScrubClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    if (!scrubRef.current) return;
+    if (!scrubRef.current || !videoRef.current || totalMs === 0) return;
     const rect = scrubRef.current.getBoundingClientRect();
     const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    
+    videoRef.current.currentTime = (pct * totalMs) / 1000;
     setProgress(pct);
-  }, []);
+  }, [totalMs]);
+
+  // 4. Controle de Play/Pause
+  const togglePlay = () => {
+    if (!videoRef.current) return;
+    if (isPlaying) {
+      videoRef.current.pause();
+    } else {
+      videoRef.current.play();
+    }
+  };
+
+  const changeSpeed = (speed: number) => {
+    if (!videoRef.current) return;
+    videoRef.current.playbackRate = speed;
+    setPlaybackRate(speed);
+  };
 
   const formatMs = (ms: number) => {
     const s = Math.floor(ms / 1000);
@@ -36,28 +86,38 @@ export default function PreviewPlayer({ sourceVideo }: Props) {
 
       {/* ── Video Canvas ── */}
       <div className="flex-1 flex items-center justify-center relative bg-[#070708] min-h-0">
-        <div className="relative w-full max-w-[720px] aspect-video bg-[#0d0d10] border border-[#1a1a20] rounded-sm overflow-hidden shadow-[0_0_60px_rgba(0,0,0,0.8)]">
+        <div className="relative w-full h-full max-h-full max-w-[90%] aspect-video bg-[#0d0d10] border border-[#1a1a20] rounded-sm overflow-hidden shadow-[0_0_60px_rgba(0,0,0,0.8)]">
 
-          {/* Mock video frame with scanline effect */}
-          <div className="absolute inset-0 bg-gradient-to-br from-[#0d0d14] via-[#080810] to-[#0a0a0d]" />
-          <div
-            className="absolute inset-0 opacity-[0.03]"
-            style={{
-              backgroundImage: 'repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(255,255,255,0.5) 2px, rgba(255,255,255,0.5) 3px)',
-            }}
-          />
-
-          {/* Center content */}
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
-            <div className="w-10 h-10 rounded-full border border-[#1e1e28] flex items-center justify-center">
-              <Play className="w-4 h-4 text-[#2a2a35] ml-0.5" />
-            </div>
-            {sourceVideo && (
-              <p className="text-[10px] font-mono text-[#222228] tracking-widest">
-                {sourceVideo.fileName} · {sourceVideo.width}×{sourceVideo.height} · {sourceVideo.fps}fps
-              </p>
-            )}
-          </div>
+          {videoSrc ? (
+            <video
+              ref={videoRef}
+              src={videoSrc}
+              className="absolute inset-0 w-full h-full object-contain"
+              onTimeUpdate={handleTimeUpdate}
+              onPlay={() => setIsPlaying(true)}
+              onPause={() => setIsPlaying(false)}
+              onEnded={() => setIsPlaying(false)}
+              muted={isMuted}
+              onClick={togglePlay}
+            />
+          ) : (
+            <>
+              {/* Mock video frame com efeito visual se não tiver vídeo */}
+              <div className="absolute inset-0 bg-gradient-to-br from-[#0d0d14] via-[#080810] to-[#0a0a0d]" />
+              <div
+                className="absolute inset-0 opacity-[0.03]"
+                style={{
+                  backgroundImage: 'repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(255,255,255,0.5) 2px, rgba(255,255,255,0.5) 3px)',
+                }}
+              />
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
+                <div className="w-10 h-10 rounded-full border border-[#1e1e28] flex items-center justify-center">
+                  <Play className="w-4 h-4 text-[#2a2a35] ml-0.5" />
+                </div>
+                <p className="text-[10px] font-mono text-[#222228] tracking-widest">NENHUM VÍDEO CARREGADO</p>
+              </div>
+            </>
+          )}
 
           {/* Timecode overlay */}
           <div className="absolute top-2 left-3">
@@ -66,19 +126,15 @@ export default function PreviewPlayer({ sourceVideo }: Props) {
             </span>
           </div>
 
-          {/* Caption preview overlay */}
-          <div className="absolute bottom-6 left-0 right-0 flex justify-center pointer-events-none">
-            <div className="bg-black/70 px-4 py-1.5 rounded-sm max-w-[80%]">
-              <p className="text-[13px] text-white/90 text-center font-medium leading-relaxed tracking-wide">
-                {isPlaying ? 'Playing preview...' : 'Caption overlay preview'}
-              </p>
+          {/* Info do vídeo */}
+          {sourceVideo && !isPlaying && (
+            <div className="absolute top-2 right-3">
+              <span className="text-[9px] font-mono text-white/40 bg-black/50 px-2 py-1 rounded">
+                {sourceVideo.width}×{sourceVideo.height} • {sourceVideo.fps}fps
+              </span>
             </div>
-          </div>
+          )}
 
-          {/* MOCK badge */}
-          <div className="absolute top-2 right-3">
-            <span className="text-[9px] font-mono text-[#f7804f]/40 tracking-widest">MOCK</span>
-          </div>
         </div>
       </div>
 
@@ -101,14 +157,6 @@ export default function PreviewPlayer({ sourceVideo }: Props) {
             className="absolute top-1/2 -translate-y-1/2 w-2.5 h-2.5 bg-[#4f6ef7] rounded-full shadow-[0_0_6px_rgba(79,110,247,0.8)] opacity-0 group-hover:opacity-100 transition-opacity -translate-x-1/2"
             style={{ left: `${progress * 100}%` }}
           />
-          {/* Cut markers (mock) */}
-          {[0.15, 0.42, 0.67, 0.88].map((p) => (
-            <div
-              key={p}
-              className="absolute top-0 h-full w-px bg-[#2a2a35]"
-              style={{ left: `${p * 100}%` }}
-            />
-          ))}
         </div>
 
         {/* Controls row */}
@@ -117,13 +165,14 @@ export default function PreviewPlayer({ sourceVideo }: Props) {
           <button
             className="w-7 h-7 flex items-center justify-center text-[#333] hover:text-[#888] transition-colors"
             title="Skip to start"
+            onClick={() => { if (videoRef.current) videoRef.current.currentTime = 0; }}
           >
             <SkipBack className="w-3.5 h-3.5" />
           </button>
 
           <button
             className="w-8 h-8 flex items-center justify-center rounded bg-[#4f6ef7]/10 border border-[#4f6ef7]/20 text-[#4f6ef7] hover:bg-[#4f6ef7]/20 transition-all"
-            onClick={() => setIsPlaying(!isPlaying)}
+            onClick={togglePlay}
             title={isPlaying ? 'Pause' : 'Play'}
           >
             {isPlaying
@@ -135,6 +184,7 @@ export default function PreviewPlayer({ sourceVideo }: Props) {
           <button
             className="w-7 h-7 flex items-center justify-center text-[#333] hover:text-[#888] transition-colors"
             title="Skip to end"
+            onClick={() => { if (videoRef.current && totalMs) videoRef.current.currentTime = totalMs / 1000; }}
           >
             <SkipForward className="w-3.5 h-3.5" />
           </button>
@@ -151,26 +201,33 @@ export default function PreviewPlayer({ sourceVideo }: Props) {
           <div className="flex-1" />
 
           {/* Right controls */}
-          <button className="w-7 h-7 flex items-center justify-center text-[#333] hover:text-[#888] transition-colors" title="Volume">
-            <Volume2 className="w-3.5 h-3.5" />
+          <button 
+            className={`w-7 h-7 flex items-center justify-center transition-colors ${isMuted ? 'text-destructive/80 hover:text-destructive' : 'text-[#333] hover:text-[#888]'}`} 
+            title="Mute"
+            onClick={() => setIsMuted(!isMuted)}
+          >
+            {isMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
           </button>
+          
           <button className="w-7 h-7 flex items-center justify-center text-[#333] hover:text-[#888] transition-colors" title="Split at playhead">
             <Scissors className="w-3.5 h-3.5" />
           </button>
-          <button className="w-7 h-7 flex items-center justify-center text-[#333] hover:text-[#888] transition-colors" title="Fullscreen">
+          
+          <button className="w-7 h-7 flex items-center justify-center text-[#333] hover:text-[#888] transition-colors" title="Fullscreen" onClick={() => videoRef.current?.requestFullscreen()}>
             <Maximize2 className="w-3.5 h-3.5" />
           </button>
 
           {/* Playback mode */}
           <div className="ml-1 flex gap-0.5">
-            {['1x', '1.5x', '2x'].map((speed) => (
+            {[1, 1.5, 2].map((speed) => (
               <button
                 key={speed}
+                onClick={() => changeSpeed(speed)}
                 className={`px-1.5 py-0.5 text-[9px] font-mono rounded transition-colors ${
-                  speed === '1x' ? 'bg-[#1e1e28] text-[#666]' : 'text-[#2a2a35] hover:text-[#555]'
+                  playbackRate === speed ? 'bg-[#1e1e28] text-[#666]' : 'text-[#2a2a35] hover:text-[#555]'
                 }`}
               >
-                {speed}
+                {speed}x
               </button>
             ))}
           </div>
