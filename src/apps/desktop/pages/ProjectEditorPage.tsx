@@ -10,24 +10,21 @@ import CaptionPanel from '@/apps/desktop/components/CaptionPanel';
 import JobsPanelEnhanced from '@/apps/desktop/components/JobsPanelEnhanced';
 import EditorToolbar from '@/apps/desktop/components/EditorToolbar';
 import AIAssistant from '@/apps/desktop/components/AIAssistant';
-import {
-  Home, FolderOpen, Sliders, Film, Download, Settings,
-  ChevronRight, LayoutPanelLeft
-} from 'lucide-react';
+import { Home, FolderOpen, Sliders, Film, Download, Settings } from 'lucide-react';
 
 const NAV_ITEMS = [
-  { id: 'home', icon: Home, label: 'Home' },
+  { id: 'home',     icon: Home,       label: 'Home' },
   { id: 'projects', icon: FolderOpen, label: 'Projects' },
-  { id: 'presets', icon: Sliders, label: 'Presets' },
-  { id: 'media', icon: Film, label: 'Media' },
-  { id: 'exports', icon: Download, label: 'Exports' },
+  { id: 'presets',  icon: Sliders,    label: 'Presets' },
+  { id: 'media',    icon: Film,       label: 'Media' },
+  { id: 'exports',  icon: Download,   label: 'Exports' },
 ];
 
 const RIGHT_TABS = [
-  { id: 'presets', label: 'Presets' },
+  { id: 'presets',  label: 'Presets' },
   { id: 'captions', label: 'Captions' },
-  { id: 'broll', label: 'B-Roll' },
-  { id: 'jobs', label: 'Jobs' },
+  { id: 'broll',    label: 'B-Roll' },
+  { id: 'jobs',     label: 'Jobs' },
 ];
 
 export default function ProjectEditorPage() {
@@ -42,7 +39,11 @@ export default function ProjectEditorPage() {
   useKeyboardShortcuts();
 
   useEffect(() => {
-    if (projectId) loadProject(projectId);
+    // 'new' significa que o projeto já foi criado via importVideoFromPath
+    // e está no store — não precisamos carregar nada
+    if (projectId && projectId !== 'new') {
+      loadProject(projectId);
+    }
   }, [projectId]);
 
   const handleNavClick = useCallback((id: string) => {
@@ -50,7 +51,8 @@ export default function ProjectEditorPage() {
     setActiveNav(id);
   }, [navigate]);
 
-  if (isLoading || !project) {
+  // Projeto não encontrado — nem loading nem 'new' com projeto no store
+  if (isLoading) {
     return (
       <div className="h-screen bg-[#0e0e0f] flex items-center justify-center">
         <div className="space-y-3 w-48">
@@ -60,6 +62,22 @@ export default function ProjectEditorPage() {
           <p className="text-[11px] text-[#555] font-mono tracking-widest text-center uppercase">
             Loading project...
           </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!project) {
+    return (
+      <div className="h-screen bg-[#0e0e0f] flex items-center justify-center">
+        <div className="text-center space-y-3">
+          <p className="text-[12px] font-mono text-[#444]">No project loaded.</p>
+          <button
+            onClick={() => navigate('/')}
+            className="text-[11px] font-mono text-[#4f6ef7] hover:underline"
+          >
+            ← Back to home
+          </button>
         </div>
       </div>
     );
@@ -76,7 +94,7 @@ export default function ProjectEditorPage() {
       {/* ── Main Body ── */}
       <div className="flex-1 flex overflow-hidden">
 
-        {/* ── Left Sidebar (icon nav) ── */}
+        {/* ── Left Sidebar ── */}
         <div className={`${sidebarCollapsed ? 'w-10' : 'w-12'} bg-[#0a0a0c] border-r border-[#1c1c20] flex flex-col items-center py-2 gap-1 flex-shrink-0 transition-all`}>
           {NAV_ITEMS.map(({ id, icon: Icon, label }) => (
             <button
@@ -117,7 +135,6 @@ export default function ProjectEditorPage() {
 
         {/* ── Right Panel ── */}
         <div className="w-[240px] border-l border-[#1c1c20] flex flex-col overflow-hidden flex-shrink-0 bg-[#0c0c0e]">
-          {/* Tab bar */}
           <div className="flex border-b border-[#1c1c20] flex-shrink-0">
             {RIGHT_TABS.map((tab) => (
               <button
@@ -134,17 +151,16 @@ export default function ProjectEditorPage() {
             ))}
           </div>
           <div className="flex-1 overflow-hidden">
-            {rightTab === 'presets' && <PresetsPanel appliedPreset={project.appliedPreset} />}
+            {rightTab === 'presets'  && <PresetsPanel appliedPreset={project.appliedPreset} />}
             {rightTab === 'captions' && <CaptionPanel />}
-            {rightTab === 'broll' && <BrollMockPanel />}
-            {rightTab === 'jobs' && <JobsPanelEnhanced legacyJobs={project.jobs} />}
+            {rightTab === 'broll'    && <BrollMockPanel />}
+            {rightTab === 'jobs'     && <JobsPanelEnhanced legacyJobs={project.jobs} />}
           </div>
         </div>
       </div>
 
       {/* ── Bottom: Timeline + Logs ── */}
       <div className="h-[160px] border-t border-[#1c1c20] bg-[#090909] flex flex-col flex-shrink-0">
-        {/* Bottom tab bar */}
         <div className="h-7 flex items-center border-b border-[#1c1c20] px-3 gap-0 flex-shrink-0">
           {(['timeline', 'logs'] as const).map((tab) => (
             <button
@@ -161,9 +177,9 @@ export default function ProjectEditorPage() {
           ))}
           <div className="flex-1" />
           <span className="text-[10px] font-mono text-[#2a2a35]">
-            {Math.floor(project.semanticTimeline?.totalDurationMs ?? 0 / 1000)}s edited
+            {Math.floor((project.semanticTimeline?.totalDurationMs ?? 0) / 1000)}s edited
             {' / '}
-            {Math.floor(project.semanticTimeline?.originalDurationMs ?? 0 / 1000)}s original
+            {Math.floor((project.sourceVideo?.durationMs ?? project.semanticTimeline?.originalDurationMs ?? 0) / 1000)}s original
           </span>
         </div>
         <div className="flex-1 overflow-hidden">
@@ -174,13 +190,13 @@ export default function ProjectEditorPage() {
         </div>
       </div>
 
-      {/* ── AI Assistant (floating) ── */}
+      {/* ── AI Assistant ── */}
       <AIAssistant />
     </div>
   );
 }
 
-// ── Inline mini-panels (sem lógica de negócio) ──────────────────────────────
+// ── Mini-panels ───────────────────────────────────────────────────────────────
 
 function BrollMockPanel() {
   return (
@@ -209,11 +225,9 @@ function BrollMockPanel() {
 
 function LogsPanel() {
   const logs = [
-    { time: '21:07:01', level: 'INFO', msg: 'Project loaded (MOCK)' },
-    { time: '21:07:01', level: 'INFO', msg: 'editor-sm: IDLE → LOADING [LOAD_PROJECT]' },
-    { time: '21:07:01', level: 'INFO', msg: 'editor-sm: LOADING → READY [PROJECT_LOADED]' },
-    { time: '21:07:01', level: 'INFO', msg: 'editor-sm: READY → EDITING [START_EDITING]' },
-    { time: '21:07:01', level: 'INFO', msg: 'autosave: Initial load saved' },
+    { time: new Date().toLocaleTimeString('en', { hour12: false }), level: 'INFO', msg: 'Editor ready' },
+    { time: new Date().toLocaleTimeString('en', { hour12: false }), level: 'INFO', msg: 'editor-sm: IDLE → EDITING' },
+    { time: new Date().toLocaleTimeString('en', { hour12: false }), level: 'INFO', msg: 'autosave: snapshot saved' },
   ];
   return (
     <div className="h-full overflow-y-auto px-3 py-2 font-mono">

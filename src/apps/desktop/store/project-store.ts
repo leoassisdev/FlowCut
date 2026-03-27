@@ -5,8 +5,9 @@
  */
 
 import { create } from 'zustand';
-import type { VideoProject, PipelineState, StylePreset, ProcessingJob, CaptionStyle } from '@/packages/shared-types';
+import type { VideoProject, PipelineState, StylePreset, ProcessingJob, CaptionStyle, SourceVideo } from '@/packages/shared-types';
 import { MOCK_PROJECT, MOCK_BROLL_CUES, MOCK_CAPTION_TRACK } from '@/apps/desktop/mocks/mock-data';
+import { getVideoMetadata } from '@/apps/desktop/services/tauri-bridge';
 import {
   type CommandHistory,
   createCommandHistory,
@@ -41,10 +42,19 @@ import { enqueueJob, cancelJob, retryJob } from '@/apps/desktop/core/job-queue';
 
 const autosaveDebounce = createAutosaveDebounce(3000);
 
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function generateProjectId(): string {
+  return `project-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+// ─── Store Interface ──────────────────────────────────────────────────────────
+
 interface ProjectStore {
   // ─── Project State ──────────────
   project: VideoProject | null;
   isLoading: boolean;
+  importError: string | null;
 
   // ─── Editor State Machine ──────
   editorMachine: EditorMachineState;
@@ -66,7 +76,7 @@ interface ProjectStore {
 
   // ─── Project Actions ───────────
   loadProject: (id: string) => void;
-  importVideo: (fileName: string) => void;
+  importVideoFromPath: (filePath: string) => Promise<void>;
   removeWord: (wordId: string) => void;
   removeSegment: (segmentId: string) => void;
   rebuildTimeline: () => void;
@@ -87,9 +97,12 @@ interface ProjectStore {
   simulateExport: () => void;
 }
 
+// ─── Store ───────────────────────────────────────────────────────────────────
+
 export const useProjectStore = create<ProjectStore>((set, get) => ({
   project: null,
   isLoading: false,
+  importError: null,
   editorMachine: createEditorMachine(),
   commandHistory: createCommandHistory(),
   autosave: createAutosaveState(),
@@ -179,29 +192,74 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     }, 300);
   },
 
-  importVideo: (fileName: string) => {
-    const project = get().project;
-    if (!project) return;
-    logger.info('project', `Import video: ${fileName} (MOCK)`);
-    set({
-      project: {
-        ...project,
-        name: fileName.replace(/\.[^.]+$/, ''),
+  /**
+   * Importa um vídeo real a partir do path selecionado pelo file picker.
+   * Lê metadados reais via ffprobe (Tauri/Rust).
+   * Cria um VideoProject real com SourceVideo populado com dados do arquivo.
+   * O transcript ainda é mock — será substituído quando a transcrição for implementada.
+   */
+  importVideoFromPath: async (filePath: string) => {
+    set({ isLoading: true, importError: null });
+    get().sendEditorEvent({ type: 'LOAD_PROJECT', projectId: 'new' });
+    logger.info('project', `Importing video from: ${filePath}`);
+
+    try {
+      // Lê metadados reais do arquivo via Tauri/ffprobe
+      const metadata = await getVideoMetadata(filePath);
+
+      if (!metadata) {
+        throw new Error('Failed to read video metadata');
+      }
+
+      logger.info('project', `Metadata read: ${metadata.file_name} ${metadata.width}x${metadata.height} ${metadata.duration_ms}ms`);
+
+      // Monta o SourceVideo com dados reais
+      const sourceVideo: SourceVideo = {
+        id: `source-${Date.now()}`,
+        filePath: metadata.file_path,
+        fileName: metadata.file_name,
+        durationMs: metadata.duration_ms,
+        width: metadata.width,
+        height: metadata.height,
+        fps: metadata.fps,
+        codec: metadata.codec,
+        sizeBytes: metadata.size_bytes,
+        proxyPath: null,   // será gerado pela engine local futuramente
+        audioPath: null,   // será extraído pela engine local futuramente
+      };
+
+      const projectId = generateProjectId();
+      const projectName = metadata.file_name.replace(/\.[^.]+$/, '');
+
+      // Cria o projeto com SourceVideo real + transcript mock
+      // O transcript mock será substituído quando Whisper for integrado
+      const newProject: VideoProject = {
+        ...structuredClone(MOCK_PROJECT),
+        id: projectId,
+        name: projectName,
         state: 'IMPORTED',
-        sourceVideo: {
-          ...project.sourceVideo!,
-          fileName,
-          filePath: `/mock/videos/${fileName}`,
-        },
-      },
-    });
-    get().markDirty();
+        sourceVideo,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      set({ project: newProject, isLoading: false });
+      get().sendEditorEvent({ type: 'PROJECT_LOADED' });
+      get().sendEditorEvent({ type: 'START_EDITING' });
+      get().saveNow('Video imported');
+
+      logger.info('project', `Project created: ${projectId} — ${projectName} (${metadata.width}x${metadata.height}, ${Math.round(metadata.duration_ms / 1000)}s)`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.info('project', `Import failed: ${message}`);
+      set({ isLoading: false, importError: message });
+      get().sendEditorEvent({ type: 'LOAD_FAILED' } as any);
+    }
   },
 
   removeWord: (wordId: string) => {
     const project = get().project;
     if (!project?.transcript) return;
-    // Find the word text for the command label
     let wordText = '';
     for (const seg of project.transcript.segments) {
       const w = seg.words.find((w) => w.id === wordId);
@@ -291,30 +349,16 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   generateBrollCues: () => {
     const project = get().project;
     if (!project) return;
-    set({
-      project: {
-        ...project,
-        state: 'BROLL_READY',
-        brollCues: MOCK_BROLL_CUES,
-      },
-    });
+    set({ project: { ...project, state: 'BROLL_READY', brollCues: MOCK_BROLL_CUES } });
     get().markDirty();
     logger.info('broll', 'B-Roll cues generated (MOCK)');
   },
 
   // ─── Jobs ─────────────────────────────────────────────────────────
 
-  enqueueJob: (type: ProcessingJob['type']) => {
-    return enqueueJob(type);
-  },
-
-  cancelJob: (id: string) => {
-    cancelJob(id);
-  },
-
-  retryJob: (id: string) => {
-    retryJob(id);
-  },
+  enqueueJob: (type: ProcessingJob['type']) => enqueueJob(type),
+  cancelJob: (id: string) => cancelJob(id),
+  retryJob: (id: string) => retryJob(id),
 
   simulateExport: () => {
     const project = get().project;
