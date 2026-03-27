@@ -45,28 +45,29 @@ function getProjectDir(projectId: string): string {
 
 /**
  * Constrói a SemanticTimeline inicial a partir do transcript.
- * Cada segmento vira um TimelineCut do tipo 'keep'.
+ * Usa os timestamps reais do vídeo (startMs e endMs do segmento).
  */
 function buildInitialTimeline(transcript: Transcript): SemanticTimeline {
-  let cursor = 0;
+  let totalDurationMs = 0;
+  
   const cuts: TimelineCut[] = transcript.segments.map((seg) => {
     const cut: TimelineCut = {
       id: `cut-${seg.id}`,
-      startMs: cursor,
-      endMs: cursor + (seg.endMs - seg.startMs),
+      startMs: seg.startMs, // Tempo real no vídeo fonte
+      endMs: seg.endMs,     // Tempo real no vídeo fonte
       type: 'keep',
       sourceSegmentId: seg.id,
       label: seg.text.slice(0, 40) + (seg.text.length > 40 ? '…' : ''),
     };
-    cursor = cut.endMs + 50;
+    totalDurationMs += (seg.endMs - seg.startMs);
     return cut;
   });
 
   return {
     id: `timeline-${transcript.id}`,
     cuts,
-    totalDurationMs: cursor,
-    originalDurationMs: cursor,
+    totalDurationMs,
+    originalDurationMs: totalDurationMs,
   };
 }
 
@@ -204,21 +205,12 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     }, 300);
   },
 
-  /**
-   * Pipeline completo de importação:
-   * 1. get_video_metadata  → metadados reais via ffprobe
-   * 2. extract_audio       → WAV 16kHz para Whisper
-   * 3. generate_proxy      → MP4 480p para preview
-   * 4. transcribeAudio     → transcrição real via engine Python + whisper.cpp
-   * 5. buildInitialTimeline → timeline semântica inicial
-   */
   importVideoFromPath: async (filePath: string) => {
     set({ isLoading: true, importError: null, importProgress: 'Reading metadata...' });
     get().sendEditorEvent({ type: 'LOAD_PROJECT', projectId: 'new' });
     logger.info('project', `Importing: ${filePath}`);
 
     try {
-      // ── Step 1: Metadados ─────────────────────────────────────────
       const metadata = await getVideoMetadata(filePath);
       if (!metadata) throw new Error('Failed to read video metadata');
 
@@ -242,7 +234,6 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         audioPath: null,
       };
 
-      // Cria projeto inicial — usuário já vê o editor
       let currentProject: VideoProject = {
         ...structuredClone(MOCK_PROJECT),
         id: projectId,
@@ -259,14 +250,10 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       get().sendEditorEvent({ type: 'PROJECT_LOADED' });
       get().sendEditorEvent({ type: 'START_EDITING' });
 
-      // ── Step 2: Extrai áudio ──────────────────────────────────────
       set({ importProgress: 'Extracting audio...' });
-      logger.info('project', 'Extracting audio...');
-
       const audioResult = await extractAudio(filePath, projectDir);
 
       if (audioResult) {
-        logger.info('project', `Audio OK: ${audioResult.output_path}`);
         currentProject = {
           ...get().project!,
           state: 'AUDIO_EXTRACTED',
@@ -275,14 +262,10 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         set({ project: currentProject });
       }
 
-      // ── Step 3: Proxy ─────────────────────────────────────────────
       set({ importProgress: 'Generating preview...' });
-      logger.info('project', 'Generating proxy...');
-
       const proxyResult = await generateProxy(filePath, projectDir);
 
       if (proxyResult) {
-        logger.info('project', `Proxy OK: ${proxyResult.output_path}`);
         currentProject = {
           ...get().project!,
           state: 'PROXY_GENERATED',
@@ -294,14 +277,11 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         set({ project: currentProject });
       }
 
-      // ── Step 4: Transcrição real ──────────────────────────────────
       const audioPath = get().project?.sourceVideo?.audioPath;
 
       if (audioPath) {
         set({ importProgress: 'Transcribing... (this may take a moment)', project: { ...get().project!, state: 'TRANSCRIBING' } });
-        logger.info('project', 'Starting transcription...');
-
-        // Verifica se engine está rodando
+        
         const engineOk = await checkEngineHealth();
 
         if (!engineOk) {
@@ -311,9 +291,6 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
           const transcript = await transcribeAudio(projectId, audioPath, 'pt');
 
           if (transcript) {
-            logger.info('project', `Transcription OK: ${transcript.segments.length} segments, ${transcript.segments.reduce((acc, s) => acc + s.words.length, 0)} words`);
-
-            // Constrói timeline real a partir do transcript
             const timeline = buildInitialTimeline(transcript);
 
             currentProject = {
@@ -324,20 +301,16 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
             };
             set({ project: currentProject });
           } else {
-            logger.info('project', 'Transcription failed — keeping mock transcript');
             set({ project: { ...get().project!, state: 'TRANSCRIBED' } });
           }
         }
       }
 
-      // ── Finaliza ──────────────────────────────────────────────────
       set({ isLoading: false, importProgress: null });
       get().saveNow('Video imported');
-      logger.info('project', `Import complete: ${projectId} — ${projectName}`);
 
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      logger.info('project', `Import failed: ${message}`);
       set({ isLoading: false, importProgress: null, importError: message });
     }
   },
@@ -362,37 +335,69 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     get().executeCommand(createRemoveSegmentCommand(segmentId, seg?.text ?? ''));
   },
 
+  /**
+   * Reconstroi a timeline agrupando palavras adjacentes mantidas.
+   * Utiliza o startMs e endMs REAIS do vídeo original!
+   */
   rebuildTimeline: () => {
     const project = get().project;
     if (!project?.transcript || !project.semanticTimeline) return;
 
-    const keptSegments = project.transcript.segments.filter(
-      (seg) => seg.words.some((w) => !w.isRemoved)
-    );
-    let cursor = 0;
-    const newCuts = keptSegments.map((seg) => {
-      const keptWords = seg.words.filter((w) => !w.isRemoved);
-      const duration = keptWords.reduce((sum, w) => sum + (w.endMs - w.startMs), 0);
-      const cut: TimelineCut = {
-        id: `cut-${seg.id}`,
-        startMs: cursor,
-        endMs: cursor + duration,
-        type: 'keep',
-        sourceSegmentId: seg.id,
-        label: keptWords.map((w) => w.word).join(' ').slice(0, 40) + '…',
-      };
-      cursor += duration + 50;
-      return cut;
+    const newCuts: TimelineCut[] = [];
+    let currentCut: TimelineCut | null = null;
+    let totalDurationMs = 0;
+
+    project.transcript.segments.forEach((seg) => {
+      seg.words.forEach((w) => {
+        if (!w.isRemoved) {
+          if (!currentCut) {
+            // Abre um novo corte com o timestamp exato do início da palavra
+            currentCut = {
+              id: `cut-${w.id}`,
+              startMs: w.startMs,
+              endMs: w.endMs,
+              type: 'keep',
+              sourceSegmentId: seg.id,
+              label: w.word,
+            };
+          } else {
+            // Estende o corte atual até o final dessa palavra
+            currentCut.endMs = w.endMs;
+            currentCut.label += ` ${w.word}`;
+          }
+        } else {
+          // Palavra cortada: finaliza o bloco atual (se existir) e joga pro array
+          if (currentCut) {
+            if (currentCut.label.length > 40) {
+              currentCut.label = currentCut.label.slice(0, 40) + '…';
+            }
+            newCuts.push(currentCut);
+            totalDurationMs += (currentCut.endMs - currentCut.startMs);
+            currentCut = null;
+          }
+        }
+      });
     });
 
-    logger.info('timeline', `Rebuilt: ${newCuts.length} cuts, ${Math.round(cursor / 1000)}s`);
+    // Se o vídeo terminar e ainda tiver um corte aberto, finaliza ele
+    if (currentCut) {
+      const finalCut = currentCut as TimelineCut;
+      if (finalCut.label.length > 40) {
+        finalCut.label = finalCut.label.slice(0, 40) + '…';
+      }
+      newCuts.push(finalCut);
+      totalDurationMs += (finalCut.endMs - finalCut.startMs);
+    }
+
+    logger.info('timeline', `Rebuilt: ${newCuts.length} cuts, ${Math.round(totalDurationMs / 1000)}s`);
+
     set({
       project: {
         ...project,
         semanticTimeline: {
           ...project.semanticTimeline,
           cuts: newCuts,
-          totalDurationMs: cursor,
+          totalDurationMs,
         },
       },
     });
@@ -417,7 +422,6 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     const project = get().project;
     if (!project) return;
     get().executeCommand(createUpdateCaptionsCommand(MOCK_CAPTION_TRACK, project.captionTrack));
-    logger.info('captions', 'Captions generated (MOCK)');
   },
 
   updateCaptionStyle: (style: CaptionStyle) => {
@@ -433,7 +437,6 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     if (!project) return;
     set({ project: { ...project, state: 'BROLL_READY', brollCues: MOCK_BROLL_CUES } });
     get().markDirty();
-    logger.info('broll', 'B-Roll cues generated (MOCK)');
   },
 
   // ─── Jobs ─────────────────────────────────────────────────────────
@@ -446,7 +449,6 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     const project = get().project;
     if (!project) return;
     set({ project: { ...project, state: 'EXPORTING' } });
-    const jobId = enqueueJob('export', 'Export video');
-    logger.info('export', `Export started (MOCK), job: ${jobId}`);
+    enqueueJob('export', 'Export video');
   },
 }));
