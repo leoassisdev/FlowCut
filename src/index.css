@@ -1,0 +1,83 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* FlowCut Design System — Dark-first video editing UI
+   All colors MUST be HSL. */
+
+@layer base {
+  :root {
+    --background: 225 15% 8%;
+    --foreground: 210 20% 92%;
+
+    --card: 225 15% 11%;
+    --card-foreground: 210 20% 92%;
+
+    --popover: 225 15% 11%;
+    --popover-foreground: 210 20% 92%;
+
+    --primary: 200 100% 55%;
+    --primary-foreground: 225 15% 5%;
+
+    --secondary: 280 60% 55%;
+    --secondary-foreground: 210 20% 95%;
+
+    --muted: 225 12% 16%;
+    --muted-foreground: 215 15% 55%;
+
+    --accent: 320 70% 55%;
+    --accent-foreground: 210 20% 95%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 225 12% 18%;
+    --input: 225 12% 18%;
+    --ring: 200 100% 55%;
+
+    --radius: 0.625rem;
+
+    --sidebar-background: 225 15% 6%;
+    --sidebar-foreground: 210 15% 70%;
+    --sidebar-primary: 200 100% 55%;
+    --sidebar-primary-foreground: 225 15% 5%;
+    --sidebar-accent: 225 12% 14%;
+    --sidebar-accent-foreground: 210 20% 92%;
+    --sidebar-border: 225 12% 15%;
+    --sidebar-ring: 200 100% 55%;
+
+    --panel: 225 15% 10%;
+    --panel-foreground: 210 20% 85%;
+    --timeline: 225 15% 7%;
+    --timeline-foreground: 210 15% 60%;
+    --status-success: 150 60% 45%;
+    --status-warning: 40 90% 55%;
+    --status-error: 0 72% 51%;
+    --status-info: 200 100% 55%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+  }
+}
+
+@layer utilities {
+  .gradient-primary {
+    background: linear-gradient(135deg, hsl(200 100% 55%), hsl(280 60% 55%));
+  }
+  .gradient-accent {
+    background: linear-gradient(135deg, hsl(280 60% 55%), hsl(320 70% 55%));
+  }
+  .glow-primary {
+    box-shadow: 0 0 20px -5px hsl(200 100% 55% / 0.3);
+  }
+  .shadow-card {
+    box-shadow: 0 4px 20px -4px hsl(0 0% 0% / 0.4);
+  }
+}
