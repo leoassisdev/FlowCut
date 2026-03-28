@@ -3,8 +3,6 @@ use std::process::Command;
 use std::path::Path;
 use tauri::Emitter;
 
-// ─── Types ───────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VideoMetadata {
     pub file_path: String,
@@ -46,8 +44,6 @@ pub struct ExportRequest {
 struct ProgressPayload {
     progress: u32,
 }
-
-// ─── Commands ────────────────────────────────────────────────────────────────
 
 #[tauri::command]
 fn get_video_metadata(file_path: String) -> Result<VideoMetadata, String> {
@@ -106,6 +102,31 @@ fn generate_proxy(video_path: String, output_dir: String) -> Result<ProcessingRe
     Ok(ProcessingResult { output_path, duration_ms, size_bytes })
 }
 
+// ─── NOVO: O EXTIRPADOR DE THUMBNAILS (NÍVEL NLE PRO) ───
+#[tauri::command]
+fn generate_thumbnails(video_path: String, output_dir: String) -> Result<ProcessingResult, String> {
+    let thumbs_dir = format!("{}/thumbs", output_dir);
+    std::fs::create_dir_all(&thumbs_dir).map_err(|e| format!("Failed to create thumbs dir: {}", e))?;
+
+    // Extrai 1 imagem JPG por segundo do vídeo em baixíssima qualidade/peso para a timeline
+    let output_pattern = format!("{}/thumb_%04d.jpg", thumbs_dir);
+    
+    let result = Command::new("ffmpeg")
+        .args([
+            "-y", "-i", &video_path,
+            "-vf", "fps=1,scale=160:-1", // 1 frame por sec, largura 160px
+            "-q:v", "5", // Compressão alta para não pesar
+            &output_pattern
+        ])
+        .output().map_err(|e| format!("Failed to extract thumbnails: {}", e))?;
+
+    if !result.status.success() { 
+        return Err(format!("ffmpeg thumbnails error: {}", String::from_utf8_lossy(&result.stderr))); 
+    }
+
+    Ok(ProcessingResult { output_path: thumbs_dir, duration_ms: 0, size_bytes: 0 })
+}
+
 #[tauri::command]
 fn export_video(app: tauri::AppHandle, request: ExportRequest) -> Result<ProcessingResult, String> {
     if request.cuts.is_empty() { return Err("No cuts provided for export".to_string()); }
@@ -119,8 +140,6 @@ fn export_video(app: tauri::AppHandle, request: ExportRequest) -> Result<Process
 
     let _ = app.emit("export-progress", ProgressPayload { progress: 5 });
 
-    // ─── SOLUÇÃO DA LEGENDA 100% BLINDADA ───
-    // Vamos usar a pasta temporária absoluta do Mac para evitar qualquer problema de pathing do FFmpeg
     let mut srt_filter = None;
     if let Some(srt_content) = &request.subtitles {
         let safe_srt_path = "/tmp/flowcut_subs.srt";
@@ -165,38 +184,22 @@ fn export_video(app: tauri::AppHandle, request: ExportRequest) -> Result<Process
 
     if segment_paths.len() == 1 {
         let mut args = vec!["-y".to_string(), "-i".to_string(), "seg_0000.mp4".to_string()];
-        if let Some(ref srt) = srt_filter {
-            args.push("-vf".to_string());
-            args.push(srt.clone());
-        }
+        if let Some(ref srt) = srt_filter { args.push("-vf".to_string()); args.push(srt.clone()); }
         args.extend(["-c:v".to_string(), "libx264".to_string(), "-preset".to_string(), preset.to_string(), "-crf".to_string(), crf.to_string(), "-c:a".to_string(), "aac".to_string(), "-b:a".to_string(), "192k".to_string(), request.output_path.clone()]);
         
         let result = cmd.args(&args).output().map_err(|e| format!("Failed to finalize export: {}", e))?;
-        if !result.status.success() {
-            let _ = std::fs::remove_dir_all(&tmp_dir);
-            return Err(format!("ffmpeg finalize error: {}", String::from_utf8_lossy(&result.stderr)));
-        }
+        if !result.status.success() { let _ = std::fs::remove_dir_all(&tmp_dir); return Err(format!("ffmpeg finalize error: {}", String::from_utf8_lossy(&result.stderr))); }
     } else {
         let concat_list_path = format!("{}/concat.txt", tmp_dir);
-        let concat_content = segment_paths.iter().enumerate()
-            .map(|(i, _)| format!("file 'seg_{:04}.mp4'\n", i))
-            .collect::<String>();
+        let concat_content = segment_paths.iter().enumerate().map(|(i, _)| format!("file 'seg_{:04}.mp4'\n", i)).collect::<String>();
         std::fs::write(&concat_list_path, concat_content).map_err(|e| format!("Failed to write concat list: {}", e))?;
 
         let mut args = vec!["-y".to_string(), "-f".to_string(), "concat".to_string(), "-safe".to_string(), "0".to_string(), "-i".to_string(), "concat.txt".to_string()];
-        
-        if let Some(ref srt) = srt_filter {
-            args.push("-vf".to_string());
-            args.push(srt.clone());
-        }
-
+        if let Some(ref srt) = srt_filter { args.push("-vf".to_string()); args.push(srt.clone()); }
         args.extend(["-c:v".to_string(), "libx264".to_string(), "-preset".to_string(), preset.to_string(), "-crf".to_string(), crf.to_string(), "-c:a".to_string(), "aac".to_string(), "-b:a".to_string(), "192k".to_string(), request.output_path.clone()]);
 
         let result = cmd.args(&args).output().map_err(|e| format!("Failed to concatenate segments: {}", e))?;
-        if !result.status.success() {
-            let _ = std::fs::remove_dir_all(&tmp_dir);
-            return Err(format!("ffmpeg concat error: {}", String::from_utf8_lossy(&result.stderr)));
-        }
+        if !result.status.success() { let _ = std::fs::remove_dir_all(&tmp_dir); return Err(format!("ffmpeg concat error: {}", String::from_utf8_lossy(&result.stderr))); }
     }
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
@@ -227,8 +230,6 @@ fn get_system_info() -> serde_json::Value {
     serde_json::json!({ "platform": std::env::consts::OS, "arch": std::env::consts::ARCH, "version": env!("CARGO_PKG_VERSION") })
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
 fn parse_fps(fps_str: &str) -> f64 {
     let parts: Vec<&str> = fps_str.split('/').collect();
     if parts.len() == 2 {
@@ -244,11 +245,8 @@ fn quality_params(quality: &str) -> (&'static str, &'static str) {
 
 fn run_proxy_ffmpeg(input: &str, output: &str, use_hw: bool) -> Result<(), String> {
     let mut args = vec!["-y".to_string(), "-i".to_string(), input.to_string()];
-    if use_hw {
-        args.extend(["-vf".to_string(), "scale=-2:480".to_string(), "-c:v".to_string(), "h264_videotoolbox".to_string(), "-b:v".to_string(), "1500k".to_string(), "-c:a".to_string(), "aac".to_string(), "-b:a".to_string(), "128k".to_string()]);
-    } else {
-        args.extend(["-vf".to_string(), "scale=-2:480".to_string(), "-c:v".to_string(), "libx264".to_string(), "-preset".to_string(), "fast".to_string(), "-crf".to_string(), "23".to_string(), "-c:a".to_string(), "aac".to_string(), "-b:a".to_string(), "128k".to_string()]);
-    }
+    if use_hw { args.extend(["-vf".to_string(), "scale=-2:480".to_string(), "-c:v".to_string(), "h264_videotoolbox".to_string(), "-b:v".to_string(), "1500k".to_string(), "-c:a".to_string(), "aac".to_string(), "-b:a".to_string(), "128k".to_string()]); } 
+    else { args.extend(["-vf".to_string(), "scale=-2:480".to_string(), "-c:v".to_string(), "libx264".to_string(), "-preset".to_string(), "fast".to_string(), "-crf".to_string(), "23".to_string(), "-c:a".to_string(), "aac".to_string(), "-b:a".to_string(), "128k".to_string()]); }
     args.push(output.to_string());
     let result = Command::new("ffmpeg").args(&args).output().map_err(|e| format!("ffmpeg spawn error: {}", e))?;
     if !result.status.success() { return Err(String::from_utf8_lossy(&result.stderr).to_string()); }
@@ -264,15 +262,14 @@ fn get_audio_duration_ms(path: &str) -> Option<u64> {
 
 fn get_video_duration_ms(path: &str) -> Option<u64> { get_audio_duration_ms(path) }
 
-// ─── App Entry ───────────────────────────────────────────────────────────────
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             get_system_info, get_video_metadata, check_ffmpeg,
-            extract_audio, generate_proxy, export_video, open_in_finder
+            extract_audio, generate_proxy, generate_thumbnails, // <-- Adicionado!
+            export_video, open_in_finder
         ])
         .run(tauri::generate_context!())
         .expect("error while running FlowCut");

@@ -11,7 +11,8 @@ import CaptionPanel from '@/apps/desktop/components/CaptionPanel';
 import JobsPanelEnhanced from '@/apps/desktop/components/JobsPanelEnhanced';
 import EditorToolbar from '@/apps/desktop/components/EditorToolbar';
 import AIAssistant from '@/apps/desktop/components/AIAssistant';
-import { Home, FolderOpen, Sliders, Film, Download, Settings, GripVertical, GripHorizontal } from 'lucide-react';
+import type { SourceVideo } from '@/packages/shared-types';
+import { Home, FolderOpen, Sliders, Film, Download, Settings, GripVertical, GripHorizontal, AudioWaveform, Info, Volume2 } from 'lucide-react';
 
 const NAV_ITEMS = [
   { id: 'home',     icon: Home,       label: 'Home' },
@@ -22,28 +23,56 @@ const NAV_ITEMS = [
 ];
 
 const RIGHT_TABS = [
+  { id: 'info',     label: 'Info' },
+  { id: 'audio',    label: 'Auto-Cut' },
   { id: 'presets',  label: 'Presets' },
   { id: 'captions', label: 'Captions' },
-  { id: 'broll',    label: 'B-Roll' },
   { id: 'jobs',     label: 'Jobs' },
 ];
 
 export default function ProjectEditorPage() {
   const { projectId } = useParams<{ projectId: string }>();
-  const { project, isLoading, loadProject } = useProjectStore();
+  const { project, isLoading, loadProject, undo, redo } = useProjectStore();
   const navigate = useNavigate();
-  const [rightTab, setRightTab] = useState('presets');
+  const [rightTab, setRightTab] = useState('info');
   const [bottomTab, setBottomTab] = useState<'timeline' | 'logs'>('timeline');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [activeNav, setActiveNav] = useState('projects');
 
+  // Estado global dos LEDs do Áudio
+  const [level, setLevel] = useState(0);
+
   useKeyboardShortcuts();
 
   useEffect(() => {
-    if (projectId && projectId !== 'new') {
-      loadProject(projectId);
-    }
+    if (projectId && projectId !== 'new') loadProject(projectId);
   }, [projectId]);
+
+  // Captura Global do Volume da Aplicação (Para o Mixer)
+  useEffect(() => {
+    const handleAudioLevel = (e: Event) => {
+      const customEvent = e as CustomEvent;
+      setLevel(customEvent.detail);
+    };
+    window.addEventListener('v-audio-level', handleAudioLevel);
+    return () => window.removeEventListener('v-audio-level', handleAudioLevel);
+  }, []);
+
+  // ─── LÓGICA DO UNDO / REDO (CMD+Z / CMD+SHIFT+Z) ───
+  useEffect(() => {
+    const handleGlobalKeys = (e: KeyboardEvent) => {
+      if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') return;
+      if (e.metaKey || e.ctrlKey) {
+        if (e.key.toLowerCase() === 'z') {
+          e.preventDefault();
+          if (e.shiftKey) redo();
+          else undo();
+        }
+      }
+    };
+    window.addEventListener('keydown', handleGlobalKeys);
+    return () => window.removeEventListener('keydown', handleGlobalKeys);
+  }, [undo, redo]);
 
   const handleNavClick = useCallback((id: string) => {
     if (id === 'home') { navigate('/'); return; }
@@ -54,12 +83,8 @@ export default function ProjectEditorPage() {
     return (
       <div className="h-screen bg-[#0e0e0f] flex items-center justify-center">
         <div className="space-y-3 w-48">
-          <div className="h-1 bg-[#1e1e22] rounded overflow-hidden">
-            <div className="h-full w-2/3 bg-[#4f6ef7] rounded animate-pulse" />
-          </div>
-          <p className="text-[11px] text-[#555] font-mono tracking-widest text-center uppercase">
-            Loading project...
-          </p>
+          <div className="h-1 bg-[#1e1e22] rounded overflow-hidden"><div className="h-full w-2/3 bg-[#4f6ef7] rounded animate-pulse" /></div>
+          <p className="text-[11px] text-[#555] font-mono tracking-widest text-center uppercase">Loading project...</p>
         </div>
       </div>
     );
@@ -68,154 +93,84 @@ export default function ProjectEditorPage() {
   if (!project) {
     return (
       <div className="h-screen bg-[#0e0e0f] flex items-center justify-center">
-        <div className="text-center space-y-3">
-          <p className="text-[12px] font-mono text-[#444]">No project loaded.</p>
-          <button
-            onClick={() => navigate('/')}
-            className="text-[11px] font-mono text-[#4f6ef7] hover:underline"
-          >
-            ← Back to home
-          </button>
-        </div>
+        <div className="text-center space-y-3"><p className="text-[12px] font-mono text-[#444]">No project loaded.</p><button onClick={() => navigate('/')} className="text-[11px] font-mono text-[#4f6ef7] hover:underline">← Back to home</button></div>
       </div>
     );
   }
 
   return (
     <div className="h-screen bg-[#0e0e0f] flex flex-col overflow-hidden font-['JetBrains_Mono',_'Fira_Code',_monospace]">
-
-      {/* ── Top Toolbar ── */}
       <div className="h-9 border-b border-[#1c1c20] flex-shrink-0">
         <EditorToolbar project={project} onNavigateHome={() => navigate('/')} />
       </div>
 
-      {/* ── Main Body (Resizable Layout) ── */}
       <div className="flex-1 flex overflow-hidden">
-        
-        {/* ── Left Sidebar (Fixa) ── */}
         <div className={`${sidebarCollapsed ? 'w-10' : 'w-12'} bg-[#0a0a0c] border-r border-[#1c1c20] flex flex-col items-center py-2 gap-1 flex-shrink-0 transition-all`}>
           {NAV_ITEMS.map(({ id, icon: Icon, label }) => (
-            <button
-              key={id}
-              onClick={() => handleNavClick(id)}
-              title={label}
-              className={`w-8 h-8 rounded flex items-center justify-center transition-all group relative
-                ${activeNav === id
-                  ? 'bg-[#4f6ef7]/20 text-[#4f6ef7]'
-                  : 'text-[#3a3a45] hover:text-[#888] hover:bg-[#1a1a1f]'
-                }`}
-            >
+            <button key={id} onClick={() => handleNavClick(id)} title={label} className={`w-8 h-8 rounded flex items-center justify-center transition-all group relative ${activeNav === id ? 'bg-[#4f6ef7]/20 text-[#4f6ef7]' : 'text-[#3a3a45] hover:text-[#888] hover:bg-[#1a1a1f]'}`}>
               <Icon className="w-3.5 h-3.5" />
-              <span className="absolute left-full ml-2 px-2 py-1 bg-[#1a1a1f] border border-[#2a2a30] text-[10px] text-[#aaa] rounded whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none z-50 transition-opacity">
-                {label}
-              </span>
+              <span className="absolute left-full ml-2 px-2 py-1 bg-[#1a1a1f] border border-[#2a2a30] text-[10px] text-[#aaa] rounded whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none z-50 transition-opacity">{label}</span>
             </button>
           ))}
           <div className="flex-1" />
-          <button
-            onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-            title="Settings"
-            className="w-8 h-8 rounded flex items-center justify-center text-[#3a3a45] hover:text-[#888] hover:bg-[#1a1a1f] transition-all"
-          >
-            <Settings className="w-3.5 h-3.5" />
-          </button>
+          <button onClick={() => setSidebarCollapsed(!sidebarCollapsed)} title="Settings" className="w-8 h-8 rounded flex items-center justify-center text-[#3a3a45] hover:text-[#888] hover:bg-[#1a1a1f] transition-all"><Settings className="w-3.5 h-3.5" /></button>
         </div>
 
-        {/* ── Área Central Redimensionável ── */}
         <PanelGroup direction="horizontal" className="flex-1 w-full h-full">
-          
-          {/* Transcript Panel */}
           <Panel defaultSize={20} minSize={15} maxSize={40} className="flex flex-col bg-[#0c0c0e]">
             <TranscriptPanel />
           </Panel>
 
-          {/* Divisor Vertical */}
-          <PanelResizeHandle className="w-1.5 bg-[#1c1c20] hover:bg-[#4f6ef7] transition-colors cursor-col-resize flex items-center justify-center flex-shrink-0">
-            <GripVertical className="w-3 h-3 text-[#555]" />
-          </PanelResizeHandle>
+          <PanelResizeHandle className="w-1.5 bg-[#1c1c20] hover:bg-[#4f6ef7] transition-colors cursor-col-resize flex items-center justify-center flex-shrink-0"><GripVertical className="w-3 h-3 text-[#555]" /></PanelResizeHandle>
 
-          {/* Centro (Player + Timeline) */}
           <Panel defaultSize={60} minSize={30} className="flex flex-col min-w-0">
             <PanelGroup direction="vertical" className="w-full h-full">
-              
-              {/* Preview Player */}
-              <Panel defaultSize={70} minSize={30} className="flex flex-col">
-                <PreviewPlayer sourceVideo={project.sourceVideo} />
-              </Panel>
+              <Panel defaultSize={70} minSize={30} className="flex flex-col"><PreviewPlayer sourceVideo={project.sourceVideo} /></Panel>
 
-              {/* Divisor Horizontal */}
-              <PanelResizeHandle className="h-1.5 bg-[#1c1c20] hover:bg-[#4f6ef7] transition-colors cursor-row-resize flex items-center justify-center flex-shrink-0">
-                <GripHorizontal className="w-3 h-3 text-[#555]" />
-              </PanelResizeHandle>
+              <PanelResizeHandle className="h-1.5 bg-[#1c1c20] hover:bg-[#4f6ef7] transition-colors cursor-row-resize flex items-center justify-center flex-shrink-0"><GripHorizontal className="w-3 h-3 text-[#555]" /></PanelResizeHandle>
 
-              {/* Timeline Panel */}
               <Panel defaultSize={30} minSize={15} className="flex flex-col bg-[#090909]">
                 <div className="h-7 flex items-center border-b border-[#1c1c20] px-3 gap-0 flex-shrink-0 bg-[#090909]">
                   {(['timeline', 'logs'] as const).map((tab) => (
-                    <button
-                      key={tab}
-                      onClick={() => setBottomTab(tab)}
-                      className={`px-3 h-full text-[10px] tracking-widest uppercase transition-colors
-                        ${bottomTab === tab
-                          ? 'text-[#ccc] border-b border-[#4f6ef7]'
-                          : 'text-[#333] hover:text-[#666]'
-                        }`}
-                    >
-                      {tab}
-                    </button>
+                    <button key={tab} onClick={() => setBottomTab(tab)} className={`px-3 h-full text-[10px] tracking-widest uppercase transition-colors ${bottomTab === tab ? 'text-[#ccc] border-b border-[#4f6ef7]' : 'text-[#333] hover:text-[#666]'}`}>{tab}</button>
                   ))}
                   <div className="flex-1" />
-                  <span className="text-[10px] font-mono text-[#2a2a35]">
-                    {Math.floor((project.semanticTimeline?.totalDurationMs ?? 0) / 1000)}s edited
-                    {' / '}
-                    {Math.floor((project.sourceVideo?.durationMs ?? project.semanticTimeline?.originalDurationMs ?? 0) / 1000)}s original
-                  </span>
+                  <span className="text-[10px] font-mono text-[#2a2a35]">{Math.floor((project.semanticTimeline?.totalDurationMs ?? 0) / 1000)}s edited / {Math.floor((project.sourceVideo?.durationMs ?? project.semanticTimeline?.originalDurationMs ?? 0) / 1000)}s original</span>
                 </div>
-                <div className="flex-1 overflow-hidden">
-                  {bottomTab === 'timeline'
-                    ? <SemanticTimelinePanel />
-                    : <LogsPanel />
-                  }
-                </div>
+                <div className="flex-1 overflow-hidden">{bottomTab === 'timeline' ? <SemanticTimelinePanel /> : <LogsPanel />}</div>
               </Panel>
-
             </PanelGroup>
           </Panel>
 
-          {/* Divisor Vertical */}
-          <PanelResizeHandle className="w-1.5 bg-[#1c1c20] hover:bg-[#4f6ef7] transition-colors cursor-col-resize flex items-center justify-center flex-shrink-0">
-            <GripVertical className="w-3 h-3 text-[#555]" />
-          </PanelResizeHandle>
+          <PanelResizeHandle className="w-1.5 bg-[#1c1c20] hover:bg-[#4f6ef7] transition-colors cursor-col-resize flex items-center justify-center flex-shrink-0"><GripVertical className="w-3 h-3 text-[#555]" /></PanelResizeHandle>
 
-          {/* Right Panel */}
+          {/* ─── PAINEL DIREITO COM MIXER FIXO ─── */}
           <Panel defaultSize={20} minSize={15} maxSize={30} className="flex flex-col bg-[#0c0c0e]">
+            
+            {/* ABAS SUPERIORES */}
             <div className="flex border-b border-[#1c1c20] flex-shrink-0">
               {RIGHT_TABS.map((tab) => (
-                <button
-                  key={tab.id}
-                  onClick={() => setRightTab(tab.id)}
-                  className={`flex-1 py-2 text-[10px] tracking-wider uppercase transition-colors font-medium
-                    ${rightTab === tab.id
-                      ? 'text-[#4f6ef7] border-b border-[#4f6ef7] bg-[#4f6ef7]/5'
-                      : 'text-[#444] hover:text-[#777]'
-                    }`}
-                >
-                  {tab.label}
-                </button>
+                <button key={tab.id} onClick={() => setRightTab(tab.id)} className={`flex-1 py-2 text-[10px] tracking-wider uppercase transition-colors font-medium ${rightTab === tab.id ? 'text-[#4f6ef7] border-b border-[#4f6ef7] bg-[#4f6ef7]/5' : 'text-[#444] hover:text-[#777]'}`}>{tab.label}</button>
               ))}
             </div>
+            
+            {/* CONTEÚDO DAS ABAS */}
             <div className="flex-1 overflow-hidden">
+              {rightTab === 'info'     && <VideoInfoPanel video={project.sourceVideo} />}
+              {rightTab === 'audio'    && <AutoCutPanel />}
               {rightTab === 'presets'  && <PresetsPanel appliedPreset={project.appliedPreset} />}
               {rightTab === 'captions' && <CaptionPanel />}
-              {rightTab === 'broll'    && <BrollMockPanel />}
               {rightTab === 'jobs'     && <JobsPanelEnhanced legacyJobs={project.jobs} />}
             </div>
-          </Panel>
 
+            {/* ── MIXER FIXO NA BASE DO PAINEL DIREITO ── */}
+            <div className="h-[260px] border-t border-[#1c1c20] bg-[#070708] flex-shrink-0 flex flex-col">
+               <DigitalMixer audioLevel={level} />
+            </div>
+
+          </Panel>
         </PanelGroup>
       </div>
-
-      {/* ── AI Assistant ── */}
       <AIAssistant />
     </div>
   );
@@ -223,48 +178,137 @@ export default function ProjectEditorPage() {
 
 // ── Mini-panels ───────────────────────────────────────────────────────────────
 
-function BrollMockPanel() {
+function VideoInfoPanel({ video }: { video: SourceVideo | null }) {
+  if (!video) return <div className="p-4 text-[11px] text-[#555]">Nenhum vídeo carregado.</div>;
+  const formatBytes = (bytes: number) => (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+  const formatTime = (ms: number) => {
+    const totalSeconds = Math.floor(ms / 1000);
+    const m = String(Math.floor(totalSeconds / 60)).padStart(2, '0');
+    const s = String(totalSeconds % 60).padStart(2, '0');
+    return `00:${m}:${s}`;
+  };
+
   return (
-    <div className="p-3 space-y-2">
-      <p className="text-[10px] uppercase tracking-widest text-[#333] mb-3">B-Roll Suggestions</p>
-      {['AI technology', 'File import', 'Video editing'].map((kw) => (
-        <div key={kw} className="bg-[#111114] border border-[#1e1e24] rounded p-2 flex items-center gap-2">
-          <div className="w-12 h-8 bg-[#1a1a20] rounded flex-shrink-0 flex items-center justify-center">
-            <Film className="w-3 h-3 text-[#333]" />
-          </div>
-          <div className="flex-1 min-w-0">
-            <p className="text-[11px] text-[#888] truncate">{kw}</p>
-            <p className="text-[10px] text-[#333]">Generated · 3s</p>
-          </div>
-          <button className="text-[10px] text-[#4f6ef7] hover:text-[#7b96ff] transition-colors">
-            Insert
-          </button>
+    <div className="p-4 space-y-4">
+      <p className="text-[11px] font-semibold text-[#eee] flex items-center gap-2 mb-2"><Info className="w-4 h-4 text-primary" /> Informações da Mídia</p>
+      <div className="space-y-1 border border-[#1c1c20] rounded p-3 bg-[#0a0a0c]">
+        <InfoRow label="File name" value={video.fileName} />
+        <InfoRow label="File size" value={formatBytes(video.sizeBytes)} />
+        <InfoRow label="Duration" value={formatTime(video.durationMs)} />
+        <InfoRow label="Frame size" value={`${video.width}x${video.height}`} />
+        <InfoRow label="Frame rate" value={`${video.fps} fps`} />
+        <InfoRow label="Video codec" value={video.codec.toUpperCase()} />
+      </div>
+    </div>
+  );
+}
+function InfoRow({ label, value }: { label: string, value: string | number }) {
+  return <div className="flex justify-between border-b border-[#1c1c20] last:border-0 pb-1.5 mb-1.5 last:pb-0 last:mb-0"><span className="text-[10px] text-[#888]">{label}</span><span className="text-[10px] text-[#ccc] font-mono text-right break-all ml-4">{value}</span></div>;
+}
+
+function AutoCutPanel() {
+  const threshold = useProjectStore((s) => s.silenceThresholdMs);
+  const setThreshold = useProjectStore((s) => s.setSilenceThresholdMs);
+  const applyCrossfade = useProjectStore((s) => s.applyCrossfade);
+  const setApplyCrossfade = useProjectStore((s) => s.setApplyCrossfade);
+  const rebuildTimeline = useProjectStore((s) => s.rebuildTimeline);
+  const restoreTimeline = useProjectStore((s) => (s as any).restoreTimeline);
+
+  return (
+    <div className="h-full flex flex-col overflow-y-auto p-4 space-y-6">
+      <div>
+        <p className="text-[11px] font-semibold text-[#eee] flex items-center gap-2 mb-2"><AudioWaveform className="w-4 h-4 text-primary" /> Auto-Cut Inteligente</p>
+        <p className="text-[10px] text-muted-foreground mb-4 leading-relaxed">Remove buracos na sua fala. Se o vídeo cortar os "S", aumente a margem de segurança.</p>
+        
+        <div className="space-y-2">
+          <div className="flex justify-between"><span className="text-[10px] text-[#888]">Limiar de Silêncio</span><span className="text-[10px] font-mono text-primary">{threshold}ms</span></div>
+          <input type="range" min="100" max="1500" step="50" value={threshold} onChange={(e) => setThreshold(Number(e.target.value))} className="w-full accent-primary" />
         </div>
-      ))}
-      <button className="w-full mt-2 py-1.5 text-[10px] tracking-wider uppercase border border-[#1e1e24] text-[#444] hover:text-[#888] hover:border-[#333] rounded transition-all">
-        Generate B-Roll
-      </button>
+        <button onClick={rebuildTimeline} className="w-full mt-4 py-2 text-[11px] font-semibold tracking-wider uppercase bg-[#1a1a24] border border-[#2a2a35] text-[#eee] hover:bg-primary/20 hover:border-primary hover:text-primary rounded transition-all">Aplicar Cortes</button>
+      </div>
+
+      <div className="pt-6 border-t border-[#1c1c20]">
+        <button onClick={restoreTimeline} className="w-full py-2 text-[11px] font-semibold tracking-wider uppercase bg-destructive/10 border border-destructive/20 text-destructive hover:bg-destructive hover:text-white rounded transition-all">Restaurar Original</button>
+      </div>
+    </div>
+  );
+}
+
+// ── O Mixer Fixo ──
+function DigitalMixer({ audioLevel }: { audioLevel: number }) {
+  const masterVolume = useProjectStore((s) => s.masterVolume);
+  const setMasterVolume = useProjectStore((s) => s.setMasterVolume);
+  const setCutVolume = useProjectStore((s) => s.setCutVolume);
+  const selectedCutId = useProjectStore((s) => s.selectedCutId);
+  const project = useProjectStore((s) => s.project);
+  
+  const selectedCut = project?.semanticTimeline?.cuts.find(c => c.id === selectedCutId);
+  const selectedVol = selectedCut ? (selectedCut as any).volume ?? 1.0 : 1.0;
+
+  return (
+    <div className="flex-1 flex flex-col p-4">
+      <p className="text-[11px] font-semibold text-[#eee] flex items-center gap-2 mb-4"><Volume2 className="w-4 h-4 text-emerald-400" /> Digital Mixer</p>
+      <div className="flex justify-around gap-4 flex-1 px-2">
+        <MixerFader 
+          label="Clipe Atual" value={selectedVol} 
+          onChange={(v) => { if (selectedCutId) setCutVolume(selectedCutId, v); }} 
+          disabled={!selectedCutId} audioLevel={audioLevel * selectedVol} 
+        />
+        <MixerFader 
+          label="Master Out" value={masterVolume} 
+          onChange={setMasterVolume} disabled={false} 
+          audioLevel={audioLevel * masterVolume} isMaster
+        />
+      </div>
+    </div>
+  );
+}
+
+function MixerFader({ label, value, onChange, disabled, audioLevel, isMaster = false }: { label: string, value: number, onChange: (v: number) => void, disabled: boolean, audioLevel: number, isMaster?: boolean }) {
+  const meterHeight = Math.min(100, audioLevel * 100 * 2.5);
+
+  const handleFaderDrag = (e: React.MouseEvent) => {
+    if (disabled) return;
+    const startY = e.clientY;
+    const startVol = value;
+    const onMouseMove = (moveEvent: MouseEvent) => {
+      const deltaY = startY - moveEvent.clientY;
+      const newVol = Math.max(0, Math.min(2.0, startVol + (deltaY / 50)));
+      onChange(newVol);
+    };
+    const onMouseUp = () => { window.removeEventListener('mousemove', onMouseMove); window.removeEventListener('mouseup', onMouseUp); };
+    window.addEventListener('mousemove', onMouseMove); window.addEventListener('mouseup', onMouseUp);
+  };
+
+  return (
+    <div className={`flex flex-col items-center gap-2 ${disabled ? 'opacity-30 pointer-events-none' : ''}`}>
+      <span className="text-[9px] font-mono text-[#888] uppercase tracking-widest">{label}</span>
+      <div className="flex gap-3 h-[130px]">
+        <div className="relative w-6 h-full bg-[#111] border border-[#222] rounded-full cursor-ns-resize flex justify-center" onMouseDown={handleFaderDrag}>
+          <div className="absolute w-8 h-4 bg-[#333] border border-[#555] rounded shadow-md pointer-events-none" style={{ bottom: `${(value / 2) * 100}%`, marginBottom: '-8px' }}>
+            <div className="w-full h-0.5 bg-[#111] mt-1.5 opacity-50" />
+          </div>
+        </div>
+        
+        {/* LED PROFISSIONAL COM DEGRADÊ E CLIPPING MASK */}
+        <div className="w-2 h-full bg-[#111] border border-[#222] rounded-sm overflow-hidden flex flex-col relative">
+          <div className="absolute inset-0 w-full h-full opacity-30 z-20" style={{ backgroundImage: 'repeating-linear-gradient(to bottom, #555, #555 1px, transparent 1px, transparent 4px)' }} />
+          {/* A Barra Colorida Completa sendo revelada de baixo pra cima */}
+          <div 
+            className="absolute inset-0 w-full h-full transition-all duration-75 ease-out z-10" 
+            style={{ 
+              background: 'linear-gradient(to top, #10b981 0%, #10b981 60%, #facc15 60%, #facc15 85%, #ef4444 85%, #ef4444 100%)',
+              clipPath: `inset(${100 - meterHeight}% 0 0 0)`
+            }} 
+          />
+        </div>
+      </div>
+      <span className={`text-[10px] font-mono mt-1 ${isMaster ? 'text-primary' : 'text-[#ccc]'}`}>{Math.round(value * 100)}%</span>
     </div>
   );
 }
 
 function LogsPanel() {
-  const logs = [
-    { time: new Date().toLocaleTimeString('en', { hour12: false }), level: 'INFO', msg: 'Editor ready' },
-    { time: new Date().toLocaleTimeString('en', { hour12: false }), level: 'INFO', msg: 'editor-sm: IDLE → EDITING' },
-    { time: new Date().toLocaleTimeString('en', { hour12: false }), level: 'INFO', msg: 'autosave: snapshot saved' },
-  ];
-  return (
-    <div className="h-full overflow-y-auto px-3 py-2 font-mono">
-      {logs.map((log, i) => (
-        <div key={i} className="flex gap-3 text-[10px] leading-5">
-          <span className="text-[#2a2a35] flex-shrink-0">{log.time}</span>
-          <span className={`flex-shrink-0 w-10 ${log.level === 'INFO' ? 'text-[#4f6ef7]' : 'text-[#f7804f]'}`}>
-            {log.level}
-          </span>
-          <span className="text-[#444]">{log.msg}</span>
-        </div>
-      ))}
-    </div>
-  );
+  const logs = [{ time: new Date().toLocaleTimeString('en', { hour12: false }), level: 'INFO', msg: 'Editor ready' }];
+  return <div className="h-full overflow-y-auto px-3 py-2 font-mono">{logs.map((log, i) => <div key={i} className="flex gap-3 text-[10px] leading-5"><span className="text-[#2a2a35] flex-shrink-0">{log.time}</span><span className={`flex-shrink-0 w-10 ${log.level === 'INFO' ? 'text-[#4f6ef7]' : 'text-[#f7804f]'}`}>{log.level}</span><span className="text-[#444]">{log.msg}</span></div>)}</div>;
 }

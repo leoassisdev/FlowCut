@@ -1,7 +1,6 @@
 /**
  * @module tauri-bridge
  * Ponte entre o frontend React e o backend Tauri (Rust).
- * Toda comunicação com o Tauri passa por aqui.
  */
 
 const IS_TAURI = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -48,6 +47,12 @@ export async function generateProxy(videoPath: string, outputDir: string): Promi
   try { const { invoke } = await import('@tauri-apps/api/core'); return await invoke<ProcessingResult>('generate_proxy', { videoPath, outputDir }); } catch (error) { console.error(error); return null; }
 }
 
+// ─── NOVO: Chamada para extrair Thumbnails ───
+export async function generateThumbnails(videoPath: string, outputDir: string): Promise<ProcessingResult | null> {
+  if (!IS_TAURI) return { output_path: '/mock/thumbs', duration_ms: 0, size_bytes: 0 };
+  try { const { invoke } = await import('@tauri-apps/api/core'); return await invoke<ProcessingResult>('generate_thumbnails', { videoPath, outputDir }); } catch (error) { console.error(error); return null; }
+}
+
 export async function exportVideo(request: ExportRequest): Promise<ProcessingResult | null> {
   if (!IS_TAURI) { await new Promise((r) => setTimeout(r, 2000)); return { output_path: `/tmp/flowcut/exports/export_mock.mp4`, duration_ms: 5000, size_bytes: 10_000_000 }; }
   try { const { invoke } = await import('@tauri-apps/api/core'); return await invoke<ProcessingResult>('export_video', { request }); } catch (error) { console.error(error); return null; }
@@ -63,11 +68,7 @@ export async function getSystemInfo(): Promise<SystemInfo> {
   try { const { invoke } = await import('@tauri-apps/api/core'); return await invoke<SystemInfo>('get_system_info'); } catch { return { platform: 'unknown', arch: 'unknown', version: '0.0.0' }; }
 }
 
-// ─── NOVO: Abre o Finder na pasta do arquivo ───
 export async function openInFinder(path: string): Promise<void> {
   if (!IS_TAURI) return;
-  try {
-    const { invoke } = await import('@tauri-apps/api/core');
-    await invoke('open_in_finder', { path });
-  } catch (error) { console.error('[tauri-bridge] openInFinder error:', error); }
+  try { const { invoke } = await import('@tauri-apps/api/core'); await invoke('open_in_finder', { path }); } catch (error) { console.error('[tauri-bridge] openInFinder error:', error); }
 }

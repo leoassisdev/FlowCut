@@ -1,7 +1,6 @@
 /**
  * @module project-store
  * Zustand store for the active VideoProject.
- * Integrates command system, undo/redo, autosave, editor state machine, and job queue.
  */
 
 import { create } from 'zustand';
@@ -11,7 +10,7 @@ import type {
   SemanticTimeline, TimelineCut,
 } from '@/packages/shared-types';
 import { MOCK_PROJECT, MOCK_BROLL_CUES, MOCK_CAPTION_TRACK } from '@/apps/desktop/mocks/mock-data';
-import { getVideoMetadata, extractAudio, generateProxy } from '@/apps/desktop/services/tauri-bridge';
+import { getVideoMetadata, extractAudio, generateProxy, generateThumbnails } from '@/apps/desktop/services/tauri-bridge';
 import { transcribeAudio, checkEngineHealth } from '@/apps/desktop/services/local-api-client';
 import {
   type CommandHistory, createCommandHistory, pushCommand,
@@ -28,441 +27,350 @@ import {
   type AutosaveState, createAutosaveState,
   saveSnapshot, restoreSnapshot, createAutosaveDebounce,
 } from '@/apps/desktop/core/autosave';
-import { logger } from '@/apps/desktop/core/logger';
 import { enqueueJob, cancelJob, retryJob } from '@/apps/desktop/core/job-queue';
 
 const autosaveDebounce = createAutosaveDebounce(3000);
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function generateProjectId(): string {
-  return `project-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-}
-
-function getProjectDir(projectId: string): string {
-  return `/tmp/flowcut/projects/${projectId}`;
-}
+function generateProjectId(): string { return `project-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`; }
+function getProjectDir(projectId: string): string { return `/tmp/flowcut/projects/${projectId}`; }
 
 function buildInitialTimeline(transcript: Transcript): SemanticTimeline {
   let totalDurationMs = 0;
-  
   const cuts: TimelineCut[] = transcript.segments.map((seg) => {
-    const cut: TimelineCut = {
-      id: `cut-${seg.id}`,
-      startMs: seg.startMs,
-      endMs: seg.endMs,
-      type: 'keep',
-      sourceSegmentId: seg.id,
-      label: seg.text.slice(0, 40) + (seg.text.length > 40 ? '…' : ''),
+    const cut: TimelineCut & { volume?: number } = {
+      id: `cut-${seg.id}`, startMs: seg.startMs, endMs: seg.endMs,
+      type: 'keep', sourceSegmentId: seg.id, label: seg.text.slice(0, 40) + '…',
+      volume: 1.0 
     };
     totalDurationMs += (seg.endMs - seg.startMs);
     return cut;
   });
-
-  return {
-    id: `timeline-${transcript.id}`,
-    cuts,
-    totalDurationMs,
-    originalDurationMs: totalDurationMs,
-  };
+  return { id: `timeline-${transcript.id}`, cuts, totalDurationMs, originalDurationMs: totalDurationMs };
 }
 
-// ─── Store Interface ──────────────────────────────────────────────────────────
+// Extensão local para armazenar o diretório de miniaturas na source
+interface SourceVideoExtended extends SourceVideo {
+  thumbsDir?: string | null;
+}
 
 interface ProjectStore {
-  project: VideoProject | null;
+  project: (VideoProject & { sourceVideo: SourceVideoExtended }) | null;
   isLoading: boolean;
   importError: string | null;
   importProgress: string | null;
 
   isRebuilding: boolean;
   rebuildProgress: number;
-
-  // NOVO: Controle de tempo de reprodução para sync com o texto
+  
+  isPlaying: boolean;
+  setIsPlaying: (playing: boolean) => void;
   currentPlaybackMs: number;
   setCurrentPlaybackMs: (ms: number) => void;
+  seekRequestMs: number | null;
+  requestSeek: (ms: number) => void;
+  
+  silenceThresholdMs: number;
+  setSilenceThresholdMs: (ms: number) => void;
+  applyCrossfade: boolean;
+  setApplyCrossfade: (apply: boolean) => void;
+
+  masterVolume: number;
+  setMasterVolume: (vol: number) => void;
+  setCutVolume: (cutId: string, vol: number) => void;
+
+  activeTool: 'selection' | 'blade';
+  setActiveTool: (tool: 'selection' | 'blade') => void;
+  selectedCutId: string | null;
+  setSelectedCutId: (id: string | null) => void;
+  
+  updateCutBounds: (cutId: string, newStartMs: number, newEndMs: number) => void;
+  splitCut: (timeMs: number) => void;
+  rippleTrim: (timeMs: number, direction: 'left' | 'right') => void;
+  deleteCut: (cutId: string) => void;
+  restoreTimeline: () => void;
 
   editorMachine: EditorMachineState;
   sendEditorEvent: (event: EditorEvent) => void;
-
   commandHistory: CommandHistory;
   executeCommand: (command: Command) => void;
-  undo: () => void;
-  redo: () => void;
-  canUndo: () => boolean;
-  canRedo: () => boolean;
-
-  autosave: AutosaveState;
-  markDirty: () => void;
-  saveNow: (label?: string) => void;
-  restoreFromSnapshot: (snapshotId: string) => void;
-
+  undo: () => void; redo: () => void; canUndo: () => boolean; canRedo: () => boolean;
+  autosave: AutosaveState; markDirty: () => void; saveNow: (label?: string) => void; restoreFromSnapshot: (snapshotId: string) => void;
   loadProject: (id: string) => void;
   importVideoFromPath: (filePath: string) => Promise<void>;
-  
   removeWord: (wordId: string) => void;
-  toggleWordRemoval: (wordId: string) => void; // NOVO: Função para riscar/desriscar
+  toggleWordRemoval: (wordId: string) => void;
   removeSegment: (segmentId: string) => void;
-  
   rebuildTimeline: () => Promise<void>;
   applyPreset: (preset: StylePreset) => void;
   setState: (state: PipelineState) => void;
-
   generateCaptions: () => void;
   updateCaptionStyle: (style: CaptionStyle) => void;
   generateBrollCues: () => void;
-
-  enqueueJob: (type: ProcessingJob['type']) => string;
-  cancelJob: (id: string) => void;
-  retryJob: (id: string) => void;
-  simulateExport: () => void;
+  enqueueJob: (type: ProcessingJob['type']) => string; cancelJob: (id: string) => void; retryJob: (id: string) => void; simulateExport: () => void;
 }
 
-// ─── Store ───────────────────────────────────────────────────────────────────
-
 export const useProjectStore = create<ProjectStore>((set, get) => ({
-  project: null,
-  isLoading: false,
-  importError: null,
-  importProgress: null,
-
-  isRebuilding: false,
-  rebuildProgress: 0,
-
+  project: null, isLoading: false, importError: null, importProgress: null,
+  isRebuilding: false, rebuildProgress: 0, 
+  
+  isPlaying: false,
+  setIsPlaying: (playing: boolean) => set({ isPlaying: playing }),
   currentPlaybackMs: 0,
   setCurrentPlaybackMs: (ms: number) => set({ currentPlaybackMs: ms }),
+  seekRequestMs: null,
+  requestSeek: (ms: number) => set({ seekRequestMs: ms }),
+  
+  silenceThresholdMs: 400,
+  setSilenceThresholdMs: (ms: number) => { set({ silenceThresholdMs: ms }); get().markDirty(); },
+  applyCrossfade: true,
+  setApplyCrossfade: (apply: boolean) => { set({ applyCrossfade: apply }); get().markDirty(); },
 
-  editorMachine: createEditorMachine(),
-  commandHistory: createCommandHistory(),
-  autosave: createAutosaveState(),
-
-  // ─── Editor State Machine ─────────────────────────────────────────
-
-  sendEditorEvent: (event: EditorEvent) => {
-    const machine = get().editorMachine;
-    if (canTransition(machine, event)) {
-      const next = transition(machine, event);
-      logger.info('editor-sm', `${machine.state} → ${next.state} [${event.type}]`);
-      set({ editorMachine: next });
-    } else {
-      logger.warn('editor-sm', `Blocked: ${machine.state} + ${event.type}`);
-    }
+  masterVolume: 1.0,
+  setMasterVolume: (vol: number) => { set({ masterVolume: vol }); get().markDirty(); },
+  
+  setCutVolume: (cutId: string, vol: number) => {
+    const project = get().project; if (!project?.semanticTimeline) return;
+    const cuts = project.semanticTimeline.cuts.map(c => 
+      c.id === cutId ? { ...c, volume: vol } : c
+    );
+    set({ project: { ...project, semanticTimeline: { ...project.semanticTimeline, cuts } } }); get().markDirty();
   },
 
-  // ─── Command System ───────────────────────────────────────────────
+  activeTool: 'selection',
+  setActiveTool: (tool) => set({ activeTool: tool }),
+  selectedCutId: null,
+  setSelectedCutId: (id) => set({ selectedCutId: id }),
+
+  updateCutBounds: (cutId, newStartMs, newEndMs) => {
+    const project = get().project; if (!project?.semanticTimeline) return;
+    const cuts = project.semanticTimeline.cuts.map(c => 
+      c.id === cutId ? { ...c, startMs: Math.max(0, newStartMs), endMs: Math.max(newStartMs + 100, newEndMs) } : c
+    );
+    set({ project: { ...project, semanticTimeline: { ...project.semanticTimeline, cuts } } }); get().markDirty();
+  },
+
+  splitCut: (timeMs) => {
+    const project = get().project; if (!project?.semanticTimeline) return;
+    const cuts = [...project.semanticTimeline.cuts];
+    const idx = cuts.findIndex(c => timeMs > c.startMs && timeMs < c.endMs);
+    if (idx === -1) return;
+    
+    const target = cuts[idx];
+    const vol = (target as any).volume ?? 1.0;
+    const cutA: TimelineCut & { volume: number } = { ...target, id: `${target.id}-a`, endMs: timeMs, volume: vol };
+    const cutB: TimelineCut & { volume: number } = { ...target, id: `${target.id}-b`, startMs: timeMs, volume: vol };
+    
+    cuts.splice(idx, 1, cutA, cutB);
+    set({ project: { ...project, semanticTimeline: { ...project.semanticTimeline, cuts } } }); get().markDirty();
+  },
+
+  rippleTrim: (timeMs, direction) => {
+    const project = get().project; if (!project?.semanticTimeline) return;
+    const cuts = [...project.semanticTimeline.cuts];
+    const targetId = get().selectedCutId;
+    
+    let idx = -1;
+    if (targetId) { idx = cuts.findIndex(c => c.id === targetId); } 
+    else { idx = cuts.findIndex(c => timeMs >= c.startMs && timeMs <= c.endMs); }
+    
+    if (idx === -1) return;
+
+    if (direction === 'left') cuts[idx].startMs = timeMs;
+    else cuts[idx].endMs = timeMs;
+    
+    if (cuts[idx].startMs >= cuts[idx].endMs) { cuts.splice(idx, 1); set({ selectedCutId: null }); }
+    
+    set({ project: { ...project, semanticTimeline: { ...project.semanticTimeline, cuts } } }); get().markDirty();
+  },
+
+  deleteCut: (cutId) => {
+    const project = get().project; if (!project?.semanticTimeline) return;
+    const cuts = project.semanticTimeline.cuts.filter(c => c.id !== cutId);
+    set({ project: { ...project, semanticTimeline: { ...project.semanticTimeline, cuts } }, selectedCutId: null });
+    get().markDirty();
+  },
+
+  restoreTimeline: () => {
+    const project = get().project; if (!project?.sourceVideo) return;
+    const originalMs = project.sourceVideo.durationMs;
+    const cuts: TimelineCut[] = [{
+      id: `cut-restore-${Date.now()}`, startMs: 0, endMs: originalMs,
+      type: 'keep', sourceSegmentId: 'restored', label: 'Vídeo Original Restaurado',
+      volume: 1.0
+    } as any];
+    set({ project: { ...project, semanticTimeline: { ...project.semanticTimeline, cuts, totalDurationMs: originalMs } } });
+    get().markDirty();
+  },
+
+  editorMachine: createEditorMachine(), commandHistory: createCommandHistory(), autosave: createAutosaveState(),
+
+  sendEditorEvent: (event: EditorEvent) => {
+    const machine = get().editorMachine; if (canTransition(machine, event)) set({ editorMachine: transition(machine, event) });
+  },
 
   executeCommand: (command: Command) => {
-    const project = get().project;
-    if (!project) return;
-    const newProject = command.execute(project);
-    const newHistory = pushCommand(get().commandHistory, command);
-    logger.info('command', `Executed: ${command.label}`);
-    set({ project: newProject, commandHistory: newHistory });
-    get().markDirty();
+    const project = get().project; if (!project) return;
+    set({ project: command.execute(project) as any, commandHistory: pushCommand(get().commandHistory, command) }); get().markDirty();
   },
 
   undo: () => {
-    const { history, command } = undoCommand(get().commandHistory);
-    if (!command || !get().project) return;
-    const project = command.undo(get().project!);
-    logger.info('command', `Undo: ${command.label}`);
-    set({ project, commandHistory: history });
-    get().markDirty();
+    const { history, command } = undoCommand(get().commandHistory); if (!command || !get().project) return;
+    set({ project: command.undo(get().project!) as any, commandHistory: history }); get().markDirty();
   },
 
   redo: () => {
-    const { history, command } = redoCommand(get().commandHistory);
-    if (!command || !get().project) return;
-    const project = command.execute(get().project!);
-    logger.info('command', `Redo: ${command.label}`);
-    set({ project, commandHistory: history });
-    get().markDirty();
+    const { history, command } = redoCommand(get().commandHistory); if (!command || !get().project) return;
+    set({ project: command.execute(get().project!) as any, commandHistory: history }); get().markDirty();
   },
 
-  canUndo: () => canUndo(get().commandHistory),
-  canRedo: () => canRedo(get().commandHistory),
+  canUndo: () => canUndo(get().commandHistory), canRedo: () => canRedo(get().commandHistory),
 
-  // ─── Autosave ─────────────────────────────────────────────────────
-
-  markDirty: () => {
-    set({ autosave: { ...get().autosave, isDirty: true } });
-    autosaveDebounce.trigger(() => get().saveNow('Autosave'));
-  },
-
-  saveNow: (label = 'Manual save') => {
-    const project = get().project;
-    if (!project) return;
-    set({ autosave: saveSnapshot(get().autosave, project, label) });
-  },
-
+  markDirty: () => { set({ autosave: { ...get().autosave, isDirty: true } }); autosaveDebounce.trigger(() => get().saveNow('Autosave')); },
+  saveNow: (label = 'Manual save') => { const project = get().project; if (project) set({ autosave: saveSnapshot(get().autosave, project, label) }); },
   restoreFromSnapshot: (snapshotId: string) => {
     const { state, project } = restoreSnapshot(get().autosave, snapshotId);
-    if (project) {
-      set({ autosave: state, project, commandHistory: createCommandHistory() });
-      logger.info('autosave', 'Project restored from snapshot');
-    }
+    if (project) set({ autosave: state, project: project as any, commandHistory: createCommandHistory() });
   },
 
-  // ─── Project Actions ──────────────────────────────────────────────
-
   loadProject: (id: string) => {
-    set({ isLoading: true });
-    get().sendEditorEvent({ type: 'LOAD_PROJECT', projectId: id });
+    set({ isLoading: true }); get().sendEditorEvent({ type: 'LOAD_PROJECT', projectId: id });
     setTimeout(() => {
-      set({ project: structuredClone(MOCK_PROJECT), isLoading: false });
-      get().sendEditorEvent({ type: 'PROJECT_LOADED' });
-      get().sendEditorEvent({ type: 'START_EDITING' });
-      get().saveNow('Initial load');
+      set({ project: structuredClone(MOCK_PROJECT) as any, isLoading: false });
+      get().sendEditorEvent({ type: 'PROJECT_LOADED' }); get().sendEditorEvent({ type: 'START_EDITING' }); get().saveNow('Initial load');
     }, 300);
   },
 
   importVideoFromPath: async (filePath: string) => {
-    set({ isLoading: true, importError: null, importProgress: 'Reading metadata...' });
+    set({ isLoading: true, importError: null, importProgress: 'Lendo metadados do vídeo...' });
     get().sendEditorEvent({ type: 'LOAD_PROJECT', projectId: 'new' });
-
     try {
       const metadata = await getVideoMetadata(filePath);
-      if (!metadata) throw new Error('Failed to read video metadata');
-
-      const projectId = generateProjectId();
-      const projectDir = getProjectDir(projectId);
+      if (!metadata) throw new Error('Falha ao ler o vídeo.');
+      const projectId = generateProjectId(); const projectDir = getProjectDir(projectId);
       const projectName = metadata.file_name.replace(/\.[^.]+$/, '');
-
-      const sourceVideo: SourceVideo = {
-        id: `source-${Date.now()}`,
-        filePath: metadata.file_path,
-        fileName: metadata.file_name,
-        durationMs: metadata.duration_ms,
-        width: metadata.width,
-        height: metadata.height,
-        fps: metadata.fps,
-        codec: metadata.codec,
-        sizeBytes: metadata.size_bytes,
-        proxyPath: null,
-        audioPath: null,
+      const sourceVideo: SourceVideoExtended = {
+        id: `source-${Date.now()}`, filePath: metadata.file_path, fileName: metadata.file_name, durationMs: metadata.duration_ms, width: metadata.width, height: metadata.height, fps: metadata.fps, codec: metadata.codec, sizeBytes: metadata.size_bytes, proxyPath: null, audioPath: null, thumbsDir: null,
       };
+      let currentProject: any = { ...structuredClone(MOCK_PROJECT), id: projectId, name: projectName, state: 'IMPORTED', sourceVideo, transcript: null, semanticTimeline: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+      set({ project: currentProject }); get().sendEditorEvent({ type: 'PROJECT_LOADED' }); get().sendEditorEvent({ type: 'START_EDITING' });
 
-      let currentProject: VideoProject = {
-        ...structuredClone(MOCK_PROJECT),
-        id: projectId,
-        name: projectName,
-        state: 'IMPORTED',
-        sourceVideo,
-        transcript: null,
-        semanticTimeline: null,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-
-      set({ project: currentProject });
-      get().sendEditorEvent({ type: 'PROJECT_LOADED' });
-      get().sendEditorEvent({ type: 'START_EDITING' });
-
-      set({ importProgress: 'Extracting audio...' });
+      set({ importProgress: 'Extraindo áudio para análise...' });
       const audioResult = await extractAudio(filePath, projectDir);
+      if (audioResult) { currentProject = { ...get().project!, state: 'AUDIO_EXTRACTED', sourceVideo: { ...sourceVideo, audioPath: audioResult.output_path } }; set({ project: currentProject }); }
 
-      if (audioResult) {
-        currentProject = {
-          ...get().project!,
-          state: 'AUDIO_EXTRACTED',
-          sourceVideo: { ...sourceVideo, audioPath: audioResult.output_path },
-        };
-        set({ project: currentProject });
-      }
+      set({ importProgress: 'Gerando miniaturas da timeline (NLE Mode)...' });
+      const thumbsResult = await generateThumbnails(filePath, projectDir);
+      if (thumbsResult) { currentProject = { ...get().project!, sourceVideo: { ...get().project!.sourceVideo, thumbsDir: thumbsResult.output_path } }; set({ project: currentProject }); }
 
-      set({ importProgress: 'Generating preview...' });
+      set({ importProgress: 'Gerando vídeo proxy...' });
       const proxyResult = await generateProxy(filePath, projectDir);
-
-      if (proxyResult) {
-        currentProject = {
-          ...get().project!,
-          state: 'PROXY_GENERATED',
-          sourceVideo: {
-            ...get().project!.sourceVideo!,
-            proxyPath: proxyResult.output_path,
-          },
-        };
-        set({ project: currentProject });
-      }
+      if (proxyResult) { currentProject = { ...get().project!, state: 'PROXY_GENERATED', sourceVideo: { ...get().project!.sourceVideo!, proxyPath: proxyResult.output_path } }; set({ project: currentProject }); }
 
       const audioPath = get().project?.sourceVideo?.audioPath;
-
       if (audioPath) {
-        set({ importProgress: 'Transcribing... (this may take a moment)', project: { ...get().project!, state: 'TRANSCRIBING' } });
-        
+        set({ importProgress: 'Transcrevendo áudio via Whisper (Isso pode demorar)...', project: { ...get().project!, state: 'TRANSCRIBING' } });
         const engineOk = await checkEngineHealth();
-
-        if (!engineOk) {
-          set({ importProgress: null });
-        } else {
+        if (!engineOk) { set({ importProgress: null }); } else {
           const transcript = await transcribeAudio(projectId, audioPath, 'pt');
-
           if (transcript) {
-            const timeline = buildInitialTimeline(transcript);
-
-            currentProject = {
-              ...get().project!,
-              state: 'ALIGNED',
-              transcript,
-              semanticTimeline: timeline,
-            };
+            currentProject = { ...get().project!, state: 'ALIGNED', transcript, semanticTimeline: buildInitialTimeline(transcript) };
             set({ project: currentProject });
-          } else {
-            set({ project: { ...get().project!, state: 'TRANSCRIBED' } });
-          }
+          } else { set({ project: { ...get().project!, state: 'TRANSCRIBED' } }); }
         }
       }
-
-      set({ isLoading: false, importProgress: null });
-      get().saveNow('Video imported');
-
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      set({ isLoading: false, importProgress: null, importError: message });
-    }
+      set({ isLoading: false, importProgress: null }); get().saveNow('Video imported');
+    } catch (error) { set({ isLoading: false, importProgress: null, importError: String(error) }); }
   },
 
-  // ─── Edit Actions ─────────────────────────────────────────────────
-
   removeWord: (wordId: string) => {
-    const project = get().project;
-    if (!project?.transcript) return;
+    const project = get().project; if (!project?.transcript) return;
     let wordText = '';
-    for (const seg of project.transcript.segments) {
-      const w = seg.words.find((w) => w.id === wordId);
-      if (w) { wordText = w.word; break; }
-    }
+    for (const seg of project.transcript.segments) { const w = seg.words.find((w) => w.id === wordId); if (w) { wordText = w.word; break; } }
     get().executeCommand(createRemoveWordCommand(wordId, wordText));
   },
 
-  // NOVO: Função que permite clicar para riscar e clicar para voltar ao normal!
   toggleWordRemoval: (wordId: string) => {
-    const project = get().project;
-    if (!project?.transcript) return;
-
-    const newProject = structuredClone(project);
-    let found = false;
-
+    const project = get().project; if (!project?.transcript) return;
+    const newProject = structuredClone(project); let found = false;
     for (const seg of newProject.transcript.segments) {
       const w = seg.words.find(w => w.id === wordId);
-      if (w) {
-        w.isRemoved = !w.isRemoved; // Inverte o estado (riscado/não riscado)
-        found = true;
-        break;
-      }
+      if (w) { w.isRemoved = !w.isRemoved; found = true; break; }
     }
-
-    if (found) {
-      set({ project: newProject });
-      get().markDirty();
-    }
+    if (found) { set({ project: newProject as any }); get().markDirty(); }
   },
 
   removeSegment: (segmentId: string) => {
-    const project = get().project;
-    if (!project?.transcript) return;
+    const project = get().project; if (!project?.transcript) return;
     const seg = project.transcript.segments.find((s) => s.id === segmentId);
     get().executeCommand(createRemoveSegmentCommand(segmentId, seg?.text ?? ''));
   },
 
+  // ─── A MÁGICA REESCRITA DO AUTO-CUT ───
   rebuildTimeline: async () => {
     const project = get().project;
     if (!project?.transcript || !project.semanticTimeline) return;
 
     set({ isRebuilding: true, rebuildProgress: 0 });
-    for (let i = 1; i <= 10; i++) {
-      await new Promise(r => setTimeout(r, 40));
-      set({ rebuildProgress: i * 10 });
+    for (let i = 1; i <= 10; i++) { await new Promise(r => setTimeout(r, 20)); set({ rebuildProgress: i * 10 }); }
+
+    const threshold = get().silenceThresholdMs; 
+    
+    // Pega todas as palavras que não foram removidas manualmente
+    const allWords = project.transcript.segments.flatMap(s => s.words).filter(w => !w.isRemoved);
+    
+    if (allWords.length === 0) {
+      set({ isRebuilding: false, rebuildProgress: 100 });
+      setTimeout(() => set({ rebuildProgress: 0 }), 300);
+      return;
     }
 
     const newCuts: TimelineCut[] = [];
-    let currentCut: TimelineCut | null = null;
+    let currentCutStart = allWords[0].startMs;
+    let currentCutEnd = allWords[0].endMs;
+    let currentLabel = allWords[0].word;
     let totalDurationMs = 0;
 
-    project.transcript.segments.forEach((seg) => {
-      seg.words.forEach((w) => {
-        if (!w.isRemoved) {
-          if (!currentCut) {
-            currentCut = { id: `cut-${w.id}`, startMs: w.startMs, endMs: w.endMs, type: 'keep', sourceSegmentId: seg.id, label: w.word };
-          } else {
-            currentCut.endMs = w.endMs;
-            currentCut.label += ` ${w.word}`;
-          }
-        } else {
-          if (currentCut) {
-            if (currentCut.label.length > 40) currentCut.label = currentCut.label.slice(0, 40) + '…';
-            newCuts.push(currentCut);
-            totalDurationMs += (currentCut.endMs - currentCut.startMs);
-            currentCut = null;
-          }
-        }
-      });
-    });
+    for (let i = 1; i < allWords.length; i++) {
+      const w = allWords[i];
+      const gap = w.startMs - currentCutEnd;
 
-    if (currentCut) {
-      const finalCut = currentCut as TimelineCut;
-      if (finalCut.label.length > 40) finalCut.label = finalCut.label.slice(0, 40) + '…';
-      newCuts.push(finalCut);
-      totalDurationMs += (finalCut.endMs - finalCut.startMs);
+      if (gap > threshold) {
+        // Encontrou um buraco de silêncio maior que a sensibilidade! Faca nele.
+        newCuts.push({
+          id: `cut-auto-${Date.now()}-${i}`, startMs: currentCutStart, endMs: currentCutEnd,
+          type: 'keep', sourceSegmentId: 'auto', label: currentLabel.length > 40 ? currentLabel.slice(0, 40) + '…' : currentLabel, volume: 1.0
+        } as any);
+        totalDurationMs += (currentCutEnd - currentCutStart);
+
+        // O próximo clipe começa na próxima palavra falada
+        currentCutStart = w.startMs;
+        currentCutEnd = w.endMs;
+        currentLabel = w.word;
+      } else {
+        // Aglutina a palavra ao clipe atual (sem silêncio perceptível)
+        currentCutEnd = w.endMs;
+        currentLabel += ` ${w.word}`;
+      }
     }
+    
+    // Salva o último fragmento
+    newCuts.push({
+      id: `cut-auto-final`, startMs: currentCutStart, endMs: currentCutEnd,
+      type: 'keep', sourceSegmentId: 'auto', label: currentLabel.length > 40 ? currentLabel.slice(0, 40) + '…' : currentLabel, volume: 1.0
+    } as any);
+    totalDurationMs += (currentCutEnd - currentCutStart);
 
-    set({
-      project: {
-        ...project,
-        semanticTimeline: {
-          ...project.semanticTimeline,
-          cuts: newCuts,
-          totalDurationMs,
-        },
-      },
-    });
+    set({ project: { ...project, semanticTimeline: { ...project.semanticTimeline, cuts: newCuts, totalDurationMs } } });
     get().markDirty();
-
     set({ isRebuilding: false, rebuildProgress: 100 });
     setTimeout(() => set({ rebuildProgress: 0 }), 300);
   },
 
-  applyPreset: (preset: StylePreset) => {
-    const project = get().project;
-    if (!project) return;
-    get().executeCommand(createApplyPresetCommand(preset, project.appliedPreset));
-  },
-
-  setState: (state: PipelineState) => {
-    const project = get().project;
-    if (!project) return;
-    set({ project: { ...project, state } });
-  },
-
-  // ─── Captions ─────────────────────────────────────────────────────
-
-  generateCaptions: () => {
-    const project = get().project;
-    if (!project) return;
-    get().executeCommand(createUpdateCaptionsCommand(MOCK_CAPTION_TRACK, project.captionTrack));
-  },
-
-  updateCaptionStyle: (style: CaptionStyle) => {
-    const project = get().project;
-    if (!project?.captionTrack) return;
-    get().executeCommand(createUpdateCaptionStyleCommand(style, project.captionTrack.style));
-  },
-
-  generateBrollCues: () => {
-    const project = get().project;
-    if (!project) return;
-    set({ project: { ...project, state: 'BROLL_READY', brollCues: MOCK_BROLL_CUES } });
-    get().markDirty();
-  },
-
-  enqueueJob: (type: ProcessingJob['type']) => enqueueJob(type),
-  cancelJob: (id: string) => cancelJob(id),
-  retryJob: (id: string) => retryJob(id),
-
-  simulateExport: () => {
-    const project = get().project;
-    if (!project) return;
-    set({ project: { ...project, state: 'EXPORTING' } });
-    enqueueJob('export', 'Export video');
-  },
+  applyPreset: (preset: StylePreset) => { const project = get().project; if (!project) return; get().executeCommand(createApplyPresetCommand(preset, project.appliedPreset)); },
+  setState: (state: PipelineState) => { const project = get().project; if (!project) return; set({ project: { ...project, state } as any }); },
+  generateCaptions: () => { const project = get().project; if (!project) return; get().executeCommand(createUpdateCaptionsCommand(MOCK_CAPTION_TRACK, project.captionTrack)); },
+  updateCaptionStyle: (style: CaptionStyle) => { const project = get().project; if (!project?.captionTrack) return; get().executeCommand(createUpdateCaptionStyleCommand(style, project.captionTrack.style)); },
+  generateBrollCues: () => { const project = get().project; if (!project) return; set({ project: { ...project, state: 'BROLL_READY', brollCues: MOCK_BROLL_CUES } as any }); get().markDirty(); },
+  enqueueJob: (type: ProcessingJob['type']) => enqueueJob(type), cancelJob: (id: string) => cancelJob(id), retryJob: (id: string) => retryJob(id),
+  simulateExport: () => { const project = get().project; if (!project) return; set({ project: { ...project, state: 'EXPORTING' } as any }); enqueueJob('export', 'Export video'); },
 }));
