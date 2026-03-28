@@ -1,204 +1,186 @@
-import { useProjectStore } from '@/apps/desktop/store/project-store';
-import type { Transcript, WordToken } from '@/packages/shared-types';
-import { ScrollArea } from '@/components/ui/scroll-area';
-import { useState, useCallback } from 'react';
-import { RefreshCw, Search, Trash2, Zap } from 'lucide-react';
+import { useProjectStore } from '../store/project-store';
+import { Search, Loader2, Copy, FileText } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
 
-interface Props {
-  transcript: Transcript | null;
+// Função auxiliar para o formato SRT
+function formatSrtTime(ms: number) {
+  const d = new Date(Date.UTC(0, 0, 0, 0, 0, 0, ms));
+  const hours = String(d.getUTCHours()).padStart(2, '0');
+  const mins = String(d.getUTCMinutes()).padStart(2, '0');
+  const secs = String(d.getUTCSeconds()).padStart(2, '0');
+  const millis = String(d.getUTCMilliseconds()).padStart(3, '0');
+  return `${hours}:${mins}:${secs},${millis}`;
 }
 
-export default function TranscriptPanel({ transcript }: Props) {
-  const { removeWord, removeSegment, rebuildTimeline } = useProjectStore();
-  const [search, setSearch] = useState('');
-  const [selectedWords, setSelectedWords] = useState<Set<string>>(new Set());
-  const [lastSelected, setLastSelected] = useState<string | null>(null);
+export default function TranscriptPanel() {
+  const project = useProjectStore((s) => s.project);
+  
+  const toggleWordRemoval = useProjectStore((s) => (s as any).toggleWordRemoval);
+  const currentPlaybackMs = useProjectStore((s) => (s as any).currentPlaybackMs);
+  const isRebuilding = useProjectStore((s) => (s as any).isRebuilding);
 
-  const handleWordClick = useCallback((
-    word: WordToken,
-    e: React.MouseEvent,
-    allWords: WordToken[]
-  ) => {
-    if (word.isRemoved) return;
+  const activeWordRef = useRef<HTMLSpanElement>(null);
+  const [copied, setCopied] = useState(false);
 
-    if (e.metaKey || e.ctrlKey) {
-      // CMD+click: toggle individual
-      setSelectedWords(prev => {
-        const next = new Set(prev);
-        next.has(word.id) ? next.delete(word.id) : next.add(word.id);
-        return next;
-      });
-      setLastSelected(word.id);
-    } else if (e.shiftKey && lastSelected) {
-      // SHIFT+click: range select
-      const ids = allWords.map(w => w.id);
-      const from = ids.indexOf(lastSelected);
-      const to = ids.indexOf(word.id);
-      const range = ids.slice(Math.min(from, to), Math.max(from, to) + 1);
-      setSelectedWords(new Set(range));
-    } else if (selectedWords.size > 0) {
-      // Clear selection on regular click
-      setSelectedWords(new Set());
-      setLastSelected(null);
-    } else {
-      // Direct remove
-      removeWord(word.id);
-      setLastSelected(word.id);
+  useEffect(() => {
+    if (activeWordRef.current) {
+      activeWordRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
-  }, [lastSelected, selectedWords, removeWord]);
+  }, [currentPlaybackMs]);
 
-  const removeSelected = useCallback(() => {
-    selectedWords.forEach(id => removeWord(id));
-    setSelectedWords(new Set());
-    setLastSelected(null);
-  }, [selectedWords, removeWord]);
+  if (!project) return <div className="flex-1 border-r border-[#1a1a20] bg-[#0c0c0f]" />;
 
-  const removeFillers = useCallback(() => {
-    if (!transcript) return;
-    transcript.segments.forEach(seg =>
-      seg.words.forEach(w => { if (w.isFillerWord && !w.isRemoved) removeWord(w.id); })
-    );
-  }, [transcript, removeWord]);
-
-  if (!transcript) {
+  const currentState = project.state as string;
+  if (['IMPORTING', 'AUDIO_EXTRACTED', 'PROXY_GENERATED', 'TRANSCRIBING'].includes(currentState)) {
     return (
-      <div className="flex-1 flex items-center justify-center p-4">
-        <p className="text-[11px] text-[#333] text-center font-mono">
-          No transcript available.<br />Import a video to begin.
-        </p>
-      </div>
+        <div className="flex-1 border-r border-[#1a1a20] bg-[#0c0c0f] flex flex-col items-center justify-center text-muted-foreground p-8 text-center gap-4">
+          <Loader2 className="w-8 h-8 animate-spin text-primary" />
+          <p>Processando áudio... Isso pode levar alguns minutos.</p>
+        </div>
     );
   }
 
-  const allWords = transcript.segments.flatMap(s => s.words);
-  const filteredSegments = search
-    ? transcript.segments.filter(s =>
-        s.text.toLowerCase().includes(search.toLowerCase())
-      )
-    : transcript.segments;
+  if (!project.transcript) {
+    return (
+        <div className="flex-1 border-r border-[#1a1a20] bg-[#0c0c0f] flex flex-col items-center justify-center text-muted-foreground p-8 text-center">
+          <p>Nenhuma transcrição disponível.</p>
+        </div>
+    );
+  }
+
+  // ─── LÓGICA DE COPIAR TEXTO EDITADO ───
+  const handleCopyTranscript = () => {
+    if (!project.transcript) return;
+    // Pega apenas as palavras que não foram cortadas!
+    const textToCopy = project.transcript.segments
+      .flatMap(seg => seg.words.filter(w => !w.isRemoved).map(w => w.word))
+      .join(' ');
+    
+    navigator.clipboard.writeText(textToCopy);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  // ─── LÓGICA DE EXPORTAR ARQUIVO .SRT ───
+  const handleDownloadSRT = () => {
+    const cuts = project.semanticTimeline?.cuts.filter(c => c.type === 'keep') || [];
+    if (cuts.length === 0) return;
+
+    let srt = '';
+    let srtIndex = 1;
+    let currentExportMs = 0;
+
+    for (const cut of cuts) {
+      const duration = cut.endMs - cut.startMs;
+      const startSrt = formatSrtTime(currentExportMs);
+      const endSrt = formatSrtTime(currentExportMs + duration);
+      srt += `${srtIndex}\n${startSrt} --> ${endSrt}\n${cut.label}\n\n`;
+      srtIndex++;
+      currentExportMs += duration;
+    }
+
+    const blob = new Blob([srt], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${project.name.replace(/\s+/g, '_')}_legendas.srt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  // ─── CHECAGEM DE SELEÇÃO DE TEXTO ───
+  const handleWordAction = (wordId: string) => {
+    // Se o usuário selecionou texto (arrastou o mouse), não corta a palavra.
+    const selection = window.getSelection();
+    if (selection && selection.toString().length > 0) return;
+    
+    toggleWordRemoval(wordId);
+  };
 
   return (
-    <div className="flex flex-col h-full bg-[#0c0c0e]">
-
-      {/* Header */}
-      <div className="px-3 py-2 border-b border-[#1a1a20] flex items-center justify-between flex-shrink-0">
-        <span className="text-[10px] uppercase tracking-widest text-[#444] font-mono">Transcript</span>
-        <button
-          onClick={rebuildTimeline}
-          className="w-6 h-6 flex items-center justify-center text-[#333] hover:text-[#4f6ef7] transition-colors"
-          title="Rebuild timeline"
-        >
-          <RefreshCw className="w-3 h-3" />
-        </button>
+    <div className="flex-1 flex flex-col border-r border-[#1a1a20] bg-[#0c0c0f] h-full overflow-hidden">
+      
+      {/* Header com Botões de Exportação */}
+      <div className="h-12 border-b border-[#1a1a20] flex items-center px-4 justify-between shrink-0">
+        <h2 className="text-xs font-semibold tracking-wider text-[#aaa] uppercase">Transcrição</h2>
+        <div className="flex gap-2">
+          <button 
+            onClick={handleCopyTranscript}
+            className="flex items-center gap-1.5 px-2 py-1 text-[10px] uppercase tracking-wider text-[#aaa] hover:text-white hover:bg-[#1a1a20] rounded transition-colors"
+            title="Copiar texto editado"
+          >
+            {copied ? <span className="text-emerald-400">Copiado!</span> : <><Copy className="w-3 h-3" /> Copiar</>}
+          </button>
+          <button 
+            onClick={handleDownloadSRT}
+            className="flex items-center gap-1.5 px-2 py-1 text-[10px] uppercase tracking-wider text-[#aaa] hover:text-white hover:bg-[#1a1a20] rounded transition-colors"
+            title="Baixar arquivo de legendas .SRT"
+          >
+            <FileText className="w-3 h-3" /> .SRT
+          </button>
+        </div>
       </div>
-
-      {/* Search */}
-      <div className="px-3 py-2 border-b border-[#141418] flex-shrink-0">
+      
+      <div className="p-3 border-b border-[#1a1a20] shrink-0">
         <div className="relative">
-          <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-[#2a2a35]" />
-          <input
-            type="text"
-            placeholder="Search transcript..."
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            className="w-full bg-[#0e0e12] border border-[#1a1a20] rounded px-2 pl-6 py-1 text-[11px] text-[#888] placeholder-[#2a2a35] font-mono outline-none focus:border-[#4f6ef7]/40 transition-colors"
+          <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-[#555]" />
+          <input 
+            type="text" 
+            placeholder="Buscar na transcrição..." 
+            className="w-full bg-[#111116] border border-[#1a1a20] rounded-md pl-9 pr-4 py-1.5 text-sm text-[#eee] focus:outline-none focus:border-primary/50 transition-colors"
           />
         </div>
       </div>
 
-      {/* Quick actions */}
-      <div className="px-3 py-1.5 border-b border-[#141418] flex gap-1.5 flex-shrink-0">
-        <button
-          onClick={removeFillers}
-          className="flex items-center gap-1 px-2 py-1 text-[9px] uppercase tracking-wider font-mono bg-[#0e0e12] border border-[#1a1a20] text-[#555] hover:text-[#f7804f] hover:border-[#f7804f]/30 rounded transition-all"
-          title="Remove filler words"
-        >
-          <Zap className="w-2.5 h-2.5" />
-          Fillers
-        </button>
-        {selectedWords.size > 0 && (
-          <button
-            onClick={removeSelected}
-            className="flex items-center gap-1 px-2 py-1 text-[9px] uppercase tracking-wider font-mono bg-[#0e0e12] border border-[#3a1a1a] text-[#cc4444] hover:border-[#cc4444]/50 rounded transition-all"
-          >
-            <Trash2 className="w-2.5 h-2.5" />
-            Remove {selectedWords.size}
-          </button>
-        )}
-      </div>
-
-      {/* Transcript content */}
-      <ScrollArea className="flex-1">
-        <div className="px-3 py-3 space-y-5">
-          {filteredSegments.map((segment) => (
-            <div key={segment.id} className="space-y-1.5">
-              {/* Segment header */}
-              <div className="flex items-center justify-between">
-                <span className="text-[9px] font-mono text-[#2a2a35] tracking-widest">
-                  {String(Math.floor(segment.startMs / 60000)).padStart(2, '0')}:
-                  {String(Math.floor((segment.startMs % 60000) / 1000)).padStart(2, '0')}
+      <div className="flex-1 overflow-y-auto p-4 space-y-6 scrollbar-thin scrollbar-thumb-[#2a2a35] scrollbar-track-transparent">
+        <div className={`transition-opacity duration-300 ${isRebuilding ? 'opacity-50 pointer-events-none' : 'opacity-100'}`}>
+          
+          {project.transcript.segments.map((seg) => (
+            <div key={seg.id} className="flex gap-4 group">
+              <div className="w-12 shrink-0 pt-1">
+                <span className="text-[10px] font-mono text-[#555]">
+                  {formatTime(seg.startMs)}
                 </span>
-                <button
-                  onClick={() => removeSegment(segment.id)}
-                  className="text-[9px] font-mono text-[#1e1e24] hover:text-[#cc4444] transition-colors px-1"
-                  title="Remove segment"
-                >
-                  ✕
-                </button>
               </div>
 
-              {/* Words */}
-              <p className="text-[12px] leading-[1.9] text-[#888]">
-                {segment.words.map((word) => {
-                  const isSelected = selectedWords.has(word.id);
-                  const isRemoved = word.isRemoved;
-                  const isFiller = word.isFillerWord && !isRemoved;
-
+              <div className="flex-1 flex flex-wrap gap-x-1.5 gap-y-2 content-start leading-relaxed">
+                {seg.words.map((w) => {
+                  const isActive = currentPlaybackMs >= w.startMs && currentPlaybackMs <= w.endMs;
+                  
                   return (
                     <span
-                      key={word.id}
-                      onClick={(e) => handleWordClick(word, e, allWords)}
+                      key={w.id}
+                      ref={isActive ? activeWordRef : null}
+                      // Use onMouseUp instead of onClick to allow text selection
+                      onMouseUp={() => handleWordAction(w.id)} 
                       className={`
-                        cursor-pointer rounded-sm px-0.5 transition-all select-none
-                        ${isRemoved
-                          ? 'line-through text-[#2a2a2a] decoration-[#3a3a3a]'
-                          : isSelected
-                          ? 'bg-[#4f6ef7]/25 text-[#a0b0ff]'
-                          : isFiller
-                          ? 'text-[#c07a40] hover:bg-[#c07a40]/10'
-                          : 'hover:bg-[#1a1a22] hover:text-[#bbb]'
-                        }
+                        text-[15px] cursor-pointer px-1 rounded transition-all duration-150 
+                        ${w.isRemoved 
+                          ? 'text-[#555] line-through decoration-[#ef4444]/60 decoration-2 hover:text-[#777]' 
+                          : isActive 
+                            ? 'text-[#4f6ef7] bg-[#4f6ef7]/10 font-medium scale-105 shadow-sm' 
+                            : 'text-[#ccc] hover:bg-[#1e1e28] hover:text-white'}
                       `}
-                      title={
-                        isRemoved ? 'Removed'
-                        : isFiller ? 'Filler word'
-                        : isSelected ? 'Selected'
-                        : 'Click to remove · Cmd+click to multi-select'
-                      }
                     >
-                      {word.word}{' '}
+                      {w.word}
                     </span>
                   );
                 })}
-              </p>
+              </div>
             </div>
           ))}
-        </div>
-        <div className="px-3 pb-3">
-          <p className="text-[9px] font-mono text-[#1e1e24] tracking-widest uppercase">
-            ⚠ Mock transcript
-          </p>
-        </div>
-      </ScrollArea>
 
-      {/* Selection hint */}
-      {selectedWords.size === 0 && (
-        <div className="px-3 py-2 border-t border-[#141418] flex-shrink-0">
-          <p className="text-[9px] font-mono text-[#222228] leading-relaxed">
-            Click word to remove · Cmd+click multi-select · Shift+click range
-          </p>
         </div>
-      )}
+      </div>
     </div>
   );
+}
+
+function formatTime(ms: number) {
+  const totalSeconds = Math.floor(ms / 1000);
+  const m = Math.floor(totalSeconds / 60);
+  const s = totalSeconds % 60;
+  return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
 }

@@ -1,19 +1,30 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, Download, Film, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
+import { ArrowLeft, Download, Film, CheckCircle2, AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Label } from '@/components/ui/label';
 import { useProjectStore } from '../store/project-store';
-import { pickExportPath, exportVideo } from '../services/tauri-bridge';
+import { pickExportPath, exportVideo, openInFinder } from '../services/tauri-bridge';
+
+function formatSrtTime(ms: number) {
+  const d = new Date(Date.UTC(0, 0, 0, 0, 0, 0, ms));
+  const hours = String(d.getUTCHours()).padStart(2, '0');
+  const mins = String(d.getUTCMinutes()).padStart(2, '0');
+  const secs = String(d.getUTCSeconds()).padStart(2, '0');
+  const millis = String(d.getUTCMilliseconds()).padStart(3, '0');
+  return `${hours}:${mins}:${secs},${millis}`;
+}
 
 export default function ExportPage() {
   const navigate = useNavigate();
   const project = useProjectStore((s) => s.project);
   
   const [quality, setQuality] = useState<'high' | 'medium' | 'ultra'>('high');
+  const [burnCaptions, setBurnCaptions] = useState(true);
   const [isExporting, setIsExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState(0);
   const [exportSuccess, setExportSuccess] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -27,53 +38,75 @@ export default function ExportPage() {
   }
 
   const handleExport = async () => {
+    let unlisten: (() => void) | undefined;
+
     try {
       setIsExporting(true);
       setError(null);
       setExportSuccess(false);
+      setExportProgress(0);
 
-      // 1. Filtra na SemanticTimeline apenas os cortes que são do tipo 'keep'
+      // Escuta o progresso do FFmpeg pelo Rust
+      const { listen } = await import('@tauri-apps/api/event');
+      unlisten = await listen('export-progress', (event: any) => {
+        setExportProgress(event.payload.progress);
+      });
+
       const keepCuts = project.semanticTimeline?.cuts.filter(c => c.type === 'keep') || [];
-      if (keepCuts.length === 0) {
-        throw new Error("A timeline está vazia ou todos os trechos do vídeo foram removidos.");
-      }
+      if (keepCuts.length === 0) throw new Error("A timeline está vazia ou todos os trechos do vídeo foram removidos.");
 
-      // 2. Mapeia para o formato que o Rust espera (start_ms e end_ms)
       const cuts = keepCuts.map(c => ({ start_ms: c.startMs, end_ms: c.endMs }));
 
-      // 👉 LOG PARA DEBUG: VAMOS DESCOBRIR O QUE ESTÁ INDO PRO RUST
-      console.log("🚨 CORTES ENVIADOS PRO RUST:", cuts, "TIMELINE COMPLETA:", project.semanticTimeline);
+      let subtitlesStr: string | undefined = undefined;
+      if (burnCaptions) {
+        let srt = '';
+        let srtIndex = 1;
+        let currentExportMs = 0;
 
-      // 3. Pede para o usuário escolher a pasta de salvamento
+        for (const cut of keepCuts) {
+          const duration = cut.endMs - cut.startMs;
+          const startSrt = formatSrtTime(currentExportMs);
+          const endSrt = formatSrtTime(currentExportMs + duration);
+          srt += `${srtIndex}\n${startSrt} --> ${endSrt}\n${cut.label}\n\n`;
+          srtIndex++;
+          currentExportMs += duration;
+        }
+        subtitlesStr = srt;
+      }
+
       const defaultName = `${project.name.replace(/[^a-z0-9]/gi, '_').toLowerCase()}_final.mp4`;
       const outputPath = await pickExportPath(defaultName);
 
       if (!outputPath) {
         setIsExporting(false);
-        return; // Usuário cancelou a janela de salvamento
+        return; 
       }
 
-      // 4. Chama o backend (Rust + FFmpeg)
       const result = await exportVideo({
-        source_video_path: project.sourceVideo.filePath, // <-- Correção mantida aqui!
+        source_video_path: project.sourceVideo.filePath,
         cuts,
         output_path: outputPath,
         width: project.sourceVideo.width,
         height: project.sourceVideo.height,
         fps: project.sourceVideo.fps,
         quality,
+        subtitles: subtitlesStr,
       });
 
-      if (!result) {
-        throw new Error("Falha ao exportar vídeo. Verifique se o FFmpeg processou os cortes corretamente.");
-      }
+      if (!result) throw new Error("Falha ao exportar vídeo.");
 
+      setExportProgress(100);
       setExportSuccess(true);
+      
+      // Abre o Finder no final!
+      await openInFinder(outputPath);
+
     } catch (err: any) {
       console.error(err);
       setError(err.message || "Erro desconhecido ao exportar o projeto.");
     } finally {
       setIsExporting(false);
+      if (unlisten) unlisten();
     }
   };
 
@@ -132,6 +165,21 @@ export default function ExportPage() {
               </RadioGroup>
             </div>
 
+            <div className="flex items-center space-x-3 p-4 border-2 border-muted rounded-md bg-muted/10">
+              <input 
+                type="checkbox" 
+                id="burn-captions" 
+                checked={burnCaptions}
+                onChange={(e) => setBurnCaptions(e.target.checked)}
+                className="w-5 h-5 accent-primary cursor-pointer"
+                disabled={isExporting}
+              />
+              <div className="flex flex-col">
+                <Label htmlFor="burn-captions" className="text-base font-semibold cursor-pointer">Queimar Legendas no Vídeo</Label>
+                <span className="text-sm text-muted-foreground">O FFmpeg vai renderizar o texto perfeitamente sincronizado com a sua fala no vídeo final.</span>
+              </div>
+            </div>
+
             {error && (
               <div className="p-4 bg-destructive/10 text-destructive rounded-lg flex items-center gap-3 text-sm">
                 <AlertCircle className="w-5 h-5 shrink-0" />
@@ -142,28 +190,30 @@ export default function ExportPage() {
             {exportSuccess && (
               <div className="p-4 bg-emerald-500/10 text-emerald-500 rounded-lg flex items-center gap-3 text-sm">
                 <CheckCircle2 className="w-5 h-5 shrink-0" />
-                <p>Vídeo exportado com sucesso! Já pode conferir na pasta que você escolheu.</p>
+                <p>Vídeo com legendas exportado com sucesso!</p>
               </div>
             )}
 
-            <Button 
-              size="lg" 
-              className="w-full gap-2 text-base h-14" 
-              onClick={handleExport}
-              disabled={isExporting}
-            >
-              {isExporting ? (
-                <>
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                  Processando Cortes (Isso pode levar alguns minutos)...
-                </>
-              ) : (
-                <>
-                  <Download className="w-5 h-5" />
-                  Iniciar Exportação
-                </>
+            <div className="space-y-3">
+              {isExporting && (
+                <div className="w-full space-y-2 mb-4">
+                  <div className="flex justify-between text-sm text-muted-foreground font-mono">
+                    <span>Exportando...</span>
+                    <span>{exportProgress}%</span>
+                  </div>
+                  <div className="w-full h-3 bg-muted rounded-full overflow-hidden">
+                    <div 
+                      className="h-full bg-primary transition-all duration-300 ease-out" 
+                      style={{ width: `${exportProgress}%` }} 
+                    />
+                  </div>
+                </div>
               )}
-            </Button>
+              <Button size="lg" className="w-full gap-2 text-base h-14" onClick={handleExport} disabled={isExporting}>
+                <Download className="w-5 h-5" />
+                {isExporting ? 'Processando...' : 'Iniciar Exportação'}
+              </Button>
+            </div>
             
           </CardContent>
         </Card>

@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import { useProjectStore } from '@/apps/desktop/store/project-store';
 import { useKeyboardShortcuts } from '@/apps/desktop/hooks/useKeyboardShortcuts';
 import PreviewPlayer from '@/apps/desktop/components/PreviewPlayer';
@@ -10,7 +11,7 @@ import CaptionPanel from '@/apps/desktop/components/CaptionPanel';
 import JobsPanelEnhanced from '@/apps/desktop/components/JobsPanelEnhanced';
 import EditorToolbar from '@/apps/desktop/components/EditorToolbar';
 import AIAssistant from '@/apps/desktop/components/AIAssistant';
-import { Home, FolderOpen, Sliders, Film, Download, Settings } from 'lucide-react';
+import { Home, FolderOpen, Sliders, Film, Download, Settings, GripVertical, GripHorizontal } from 'lucide-react';
 
 const NAV_ITEMS = [
   { id: 'home',     icon: Home,       label: 'Home' },
@@ -39,8 +40,6 @@ export default function ProjectEditorPage() {
   useKeyboardShortcuts();
 
   useEffect(() => {
-    // 'new' significa que o projeto já foi criado via importVideoFromPath
-    // e está no store — não precisamos carregar nada
     if (projectId && projectId !== 'new') {
       loadProject(projectId);
     }
@@ -51,7 +50,6 @@ export default function ProjectEditorPage() {
     setActiveNav(id);
   }, [navigate]);
 
-  // Projeto não encontrado — nem loading nem 'new' com projeto no store
   if (isLoading) {
     return (
       <div className="h-screen bg-[#0e0e0f] flex items-center justify-center">
@@ -91,10 +89,10 @@ export default function ProjectEditorPage() {
         <EditorToolbar project={project} onNavigateHome={() => navigate('/')} />
       </div>
 
-      {/* ── Main Body ── */}
+      {/* ── Main Body (Resizable Layout) ── */}
       <div className="flex-1 flex overflow-hidden">
-
-        {/* ── Left Sidebar ── */}
+        
+        {/* ── Left Sidebar (Fixa) ── */}
         <div className={`${sidebarCollapsed ? 'w-10' : 'w-12'} bg-[#0a0a0c] border-r border-[#1c1c20] flex flex-col items-center py-2 gap-1 flex-shrink-0 transition-all`}>
           {NAV_ITEMS.map(({ id, icon: Icon, label }) => (
             <button
@@ -123,71 +121,98 @@ export default function ProjectEditorPage() {
           </button>
         </div>
 
-        {/* ── Transcript Panel ── */}
-        <div className="w-[260px] border-r border-[#1c1c20] flex flex-col overflow-hidden flex-shrink-0 bg-[#0c0c0e]">
-          <TranscriptPanel transcript={project.transcript} />
-        </div>
+        {/* ── Área Central Redimensionável ── */}
+        <PanelGroup direction="horizontal" className="flex-1 w-full h-full">
+          
+          {/* Transcript Panel */}
+          <Panel defaultSize={20} minSize={15} maxSize={40} className="flex flex-col bg-[#0c0c0e]">
+            <TranscriptPanel />
+          </Panel>
 
-        {/* ── Center: Preview ── */}
-        <div className="flex-1 flex flex-col overflow-hidden min-w-0">
-          <PreviewPlayer sourceVideo={project.sourceVideo} />
-        </div>
+          {/* Divisor Vertical */}
+          <PanelResizeHandle className="w-1.5 bg-[#1c1c20] hover:bg-[#4f6ef7] transition-colors cursor-col-resize flex items-center justify-center flex-shrink-0">
+            <GripVertical className="w-3 h-3 text-[#555]" />
+          </PanelResizeHandle>
 
-        {/* ── Right Panel ── */}
-        <div className="w-[240px] border-l border-[#1c1c20] flex flex-col overflow-hidden flex-shrink-0 bg-[#0c0c0e]">
-          <div className="flex border-b border-[#1c1c20] flex-shrink-0">
-            {RIGHT_TABS.map((tab) => (
-              <button
-                key={tab.id}
-                onClick={() => setRightTab(tab.id)}
-                className={`flex-1 py-2 text-[10px] tracking-wider uppercase transition-colors font-medium
-                  ${rightTab === tab.id
-                    ? 'text-[#4f6ef7] border-b border-[#4f6ef7] bg-[#4f6ef7]/5'
-                    : 'text-[#444] hover:text-[#777]'
-                  }`}
-              >
-                {tab.label}
-              </button>
-            ))}
-          </div>
-          <div className="flex-1 overflow-hidden">
-            {rightTab === 'presets'  && <PresetsPanel appliedPreset={project.appliedPreset} />}
-            {rightTab === 'captions' && <CaptionPanel />}
-            {rightTab === 'broll'    && <BrollMockPanel />}
-            {rightTab === 'jobs'     && <JobsPanelEnhanced legacyJobs={project.jobs} />}
-          </div>
-        </div>
-      </div>
+          {/* Centro (Player + Timeline) */}
+          <Panel defaultSize={60} minSize={30} className="flex flex-col min-w-0">
+            <PanelGroup direction="vertical" className="w-full h-full">
+              
+              {/* Preview Player */}
+              <Panel defaultSize={70} minSize={30} className="flex flex-col">
+                <PreviewPlayer sourceVideo={project.sourceVideo} />
+              </Panel>
 
-      {/* ── Bottom: Timeline + Logs ── */}
-      <div className="h-[160px] border-t border-[#1c1c20] bg-[#090909] flex flex-col flex-shrink-0">
-        <div className="h-7 flex items-center border-b border-[#1c1c20] px-3 gap-0 flex-shrink-0">
-          {(['timeline', 'logs'] as const).map((tab) => (
-            <button
-              key={tab}
-              onClick={() => setBottomTab(tab)}
-              className={`px-3 h-full text-[10px] tracking-widest uppercase transition-colors
-                ${bottomTab === tab
-                  ? 'text-[#ccc] border-b border-[#4f6ef7]'
-                  : 'text-[#333] hover:text-[#666]'
-                }`}
-            >
-              {tab}
-            </button>
-          ))}
-          <div className="flex-1" />
-          <span className="text-[10px] font-mono text-[#2a2a35]">
-            {Math.floor((project.semanticTimeline?.totalDurationMs ?? 0) / 1000)}s edited
-            {' / '}
-            {Math.floor((project.sourceVideo?.durationMs ?? project.semanticTimeline?.originalDurationMs ?? 0) / 1000)}s original
-          </span>
-        </div>
-        <div className="flex-1 overflow-hidden">
-          {bottomTab === 'timeline'
-            ? <SemanticTimelinePanel timeline={project.semanticTimeline} />
-            : <LogsPanel />
-          }
-        </div>
+              {/* Divisor Horizontal */}
+              <PanelResizeHandle className="h-1.5 bg-[#1c1c20] hover:bg-[#4f6ef7] transition-colors cursor-row-resize flex items-center justify-center flex-shrink-0">
+                <GripHorizontal className="w-3 h-3 text-[#555]" />
+              </PanelResizeHandle>
+
+              {/* Timeline Panel */}
+              <Panel defaultSize={30} minSize={15} className="flex flex-col bg-[#090909]">
+                <div className="h-7 flex items-center border-b border-[#1c1c20] px-3 gap-0 flex-shrink-0 bg-[#090909]">
+                  {(['timeline', 'logs'] as const).map((tab) => (
+                    <button
+                      key={tab}
+                      onClick={() => setBottomTab(tab)}
+                      className={`px-3 h-full text-[10px] tracking-widest uppercase transition-colors
+                        ${bottomTab === tab
+                          ? 'text-[#ccc] border-b border-[#4f6ef7]'
+                          : 'text-[#333] hover:text-[#666]'
+                        }`}
+                    >
+                      {tab}
+                    </button>
+                  ))}
+                  <div className="flex-1" />
+                  <span className="text-[10px] font-mono text-[#2a2a35]">
+                    {Math.floor((project.semanticTimeline?.totalDurationMs ?? 0) / 1000)}s edited
+                    {' / '}
+                    {Math.floor((project.sourceVideo?.durationMs ?? project.semanticTimeline?.originalDurationMs ?? 0) / 1000)}s original
+                  </span>
+                </div>
+                <div className="flex-1 overflow-hidden">
+                  {bottomTab === 'timeline'
+                    ? <SemanticTimelinePanel />
+                    : <LogsPanel />
+                  }
+                </div>
+              </Panel>
+
+            </PanelGroup>
+          </Panel>
+
+          {/* Divisor Vertical */}
+          <PanelResizeHandle className="w-1.5 bg-[#1c1c20] hover:bg-[#4f6ef7] transition-colors cursor-col-resize flex items-center justify-center flex-shrink-0">
+            <GripVertical className="w-3 h-3 text-[#555]" />
+          </PanelResizeHandle>
+
+          {/* Right Panel */}
+          <Panel defaultSize={20} minSize={15} maxSize={30} className="flex flex-col bg-[#0c0c0e]">
+            <div className="flex border-b border-[#1c1c20] flex-shrink-0">
+              {RIGHT_TABS.map((tab) => (
+                <button
+                  key={tab.id}
+                  onClick={() => setRightTab(tab.id)}
+                  className={`flex-1 py-2 text-[10px] tracking-wider uppercase transition-colors font-medium
+                    ${rightTab === tab.id
+                      ? 'text-[#4f6ef7] border-b border-[#4f6ef7] bg-[#4f6ef7]/5'
+                      : 'text-[#444] hover:text-[#777]'
+                    }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+            <div className="flex-1 overflow-hidden">
+              {rightTab === 'presets'  && <PresetsPanel appliedPreset={project.appliedPreset} />}
+              {rightTab === 'captions' && <CaptionPanel />}
+              {rightTab === 'broll'    && <BrollMockPanel />}
+              {rightTab === 'jobs'     && <JobsPanelEnhanced legacyJobs={project.jobs} />}
+            </div>
+          </Panel>
+
+        </PanelGroup>
       </div>
 
       {/* ── AI Assistant ── */}

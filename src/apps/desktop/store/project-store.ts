@@ -43,18 +43,14 @@ function getProjectDir(projectId: string): string {
   return `/tmp/flowcut/projects/${projectId}`;
 }
 
-/**
- * Constrói a SemanticTimeline inicial a partir do transcript.
- * Usa os timestamps reais do vídeo (startMs e endMs do segmento).
- */
 function buildInitialTimeline(transcript: Transcript): SemanticTimeline {
   let totalDurationMs = 0;
   
   const cuts: TimelineCut[] = transcript.segments.map((seg) => {
     const cut: TimelineCut = {
       id: `cut-${seg.id}`,
-      startMs: seg.startMs, // Tempo real no vídeo fonte
-      endMs: seg.endMs,     // Tempo real no vídeo fonte
+      startMs: seg.startMs,
+      endMs: seg.endMs,
       type: 'keep',
       sourceSegmentId: seg.id,
       label: seg.text.slice(0, 40) + (seg.text.length > 40 ? '…' : ''),
@@ -79,6 +75,13 @@ interface ProjectStore {
   importError: string | null;
   importProgress: string | null;
 
+  isRebuilding: boolean;
+  rebuildProgress: number;
+
+  // NOVO: Controle de tempo de reprodução para sync com o texto
+  currentPlaybackMs: number;
+  setCurrentPlaybackMs: (ms: number) => void;
+
   editorMachine: EditorMachineState;
   sendEditorEvent: (event: EditorEvent) => void;
 
@@ -96,9 +99,12 @@ interface ProjectStore {
 
   loadProject: (id: string) => void;
   importVideoFromPath: (filePath: string) => Promise<void>;
+  
   removeWord: (wordId: string) => void;
+  toggleWordRemoval: (wordId: string) => void; // NOVO: Função para riscar/desriscar
   removeSegment: (segmentId: string) => void;
-  rebuildTimeline: () => void;
+  
+  rebuildTimeline: () => Promise<void>;
   applyPreset: (preset: StylePreset) => void;
   setState: (state: PipelineState) => void;
 
@@ -119,6 +125,13 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   isLoading: false,
   importError: null,
   importProgress: null,
+
+  isRebuilding: false,
+  rebuildProgress: 0,
+
+  currentPlaybackMs: 0,
+  setCurrentPlaybackMs: (ms: number) => set({ currentPlaybackMs: ms }),
+
   editorMachine: createEditorMachine(),
   commandHistory: createCommandHistory(),
   autosave: createAutosaveState(),
@@ -195,20 +208,17 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   loadProject: (id: string) => {
     set({ isLoading: true });
     get().sendEditorEvent({ type: 'LOAD_PROJECT', projectId: id });
-    logger.info('project', `Loading project: ${id}`);
     setTimeout(() => {
       set({ project: structuredClone(MOCK_PROJECT), isLoading: false });
       get().sendEditorEvent({ type: 'PROJECT_LOADED' });
       get().sendEditorEvent({ type: 'START_EDITING' });
       get().saveNow('Initial load');
-      logger.info('project', 'Project loaded (MOCK)');
     }, 300);
   },
 
   importVideoFromPath: async (filePath: string) => {
     set({ isLoading: true, importError: null, importProgress: 'Reading metadata...' });
     get().sendEditorEvent({ type: 'LOAD_PROJECT', projectId: 'new' });
-    logger.info('project', `Importing: ${filePath}`);
 
     try {
       const metadata = await getVideoMetadata(filePath);
@@ -217,8 +227,6 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       const projectId = generateProjectId();
       const projectDir = getProjectDir(projectId);
       const projectName = metadata.file_name.replace(/\.[^.]+$/, '');
-
-      logger.info('project', `Metadata OK: ${metadata.file_name} ${metadata.width}x${metadata.height} ${metadata.duration_ms}ms`);
 
       const sourceVideo: SourceVideo = {
         id: `source-${Date.now()}`,
@@ -285,7 +293,6 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         const engineOk = await checkEngineHealth();
 
         if (!engineOk) {
-          logger.info('project', 'Engine not running — keeping mock transcript');
           set({ importProgress: null });
         } else {
           const transcript = await transcribeAudio(projectId, audioPath, 'pt');
@@ -328,6 +335,29 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     get().executeCommand(createRemoveWordCommand(wordId, wordText));
   },
 
+  // NOVO: Função que permite clicar para riscar e clicar para voltar ao normal!
+  toggleWordRemoval: (wordId: string) => {
+    const project = get().project;
+    if (!project?.transcript) return;
+
+    const newProject = structuredClone(project);
+    let found = false;
+
+    for (const seg of newProject.transcript.segments) {
+      const w = seg.words.find(w => w.id === wordId);
+      if (w) {
+        w.isRemoved = !w.isRemoved; // Inverte o estado (riscado/não riscado)
+        found = true;
+        break;
+      }
+    }
+
+    if (found) {
+      set({ project: newProject });
+      get().markDirty();
+    }
+  },
+
   removeSegment: (segmentId: string) => {
     const project = get().project;
     if (!project?.transcript) return;
@@ -335,13 +365,15 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     get().executeCommand(createRemoveSegmentCommand(segmentId, seg?.text ?? ''));
   },
 
-  /**
-   * Reconstroi a timeline agrupando palavras adjacentes mantidas.
-   * Utiliza o startMs e endMs REAIS do vídeo original!
-   */
-  rebuildTimeline: () => {
+  rebuildTimeline: async () => {
     const project = get().project;
     if (!project?.transcript || !project.semanticTimeline) return;
+
+    set({ isRebuilding: true, rebuildProgress: 0 });
+    for (let i = 1; i <= 10; i++) {
+      await new Promise(r => setTimeout(r, 40));
+      set({ rebuildProgress: i * 10 });
+    }
 
     const newCuts: TimelineCut[] = [];
     let currentCut: TimelineCut | null = null;
@@ -351,26 +383,14 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       seg.words.forEach((w) => {
         if (!w.isRemoved) {
           if (!currentCut) {
-            // Abre um novo corte com o timestamp exato do início da palavra
-            currentCut = {
-              id: `cut-${w.id}`,
-              startMs: w.startMs,
-              endMs: w.endMs,
-              type: 'keep',
-              sourceSegmentId: seg.id,
-              label: w.word,
-            };
+            currentCut = { id: `cut-${w.id}`, startMs: w.startMs, endMs: w.endMs, type: 'keep', sourceSegmentId: seg.id, label: w.word };
           } else {
-            // Estende o corte atual até o final dessa palavra
             currentCut.endMs = w.endMs;
             currentCut.label += ` ${w.word}`;
           }
         } else {
-          // Palavra cortada: finaliza o bloco atual (se existir) e joga pro array
           if (currentCut) {
-            if (currentCut.label.length > 40) {
-              currentCut.label = currentCut.label.slice(0, 40) + '…';
-            }
+            if (currentCut.label.length > 40) currentCut.label = currentCut.label.slice(0, 40) + '…';
             newCuts.push(currentCut);
             totalDurationMs += (currentCut.endMs - currentCut.startMs);
             currentCut = null;
@@ -379,17 +399,12 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       });
     });
 
-    // Se o vídeo terminar e ainda tiver um corte aberto, finaliza ele
     if (currentCut) {
       const finalCut = currentCut as TimelineCut;
-      if (finalCut.label.length > 40) {
-        finalCut.label = finalCut.label.slice(0, 40) + '…';
-      }
+      if (finalCut.label.length > 40) finalCut.label = finalCut.label.slice(0, 40) + '…';
       newCuts.push(finalCut);
       totalDurationMs += (finalCut.endMs - finalCut.startMs);
     }
-
-    logger.info('timeline', `Rebuilt: ${newCuts.length} cuts, ${Math.round(totalDurationMs / 1000)}s`);
 
     set({
       project: {
@@ -402,6 +417,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       },
     });
     get().markDirty();
+
+    set({ isRebuilding: false, rebuildProgress: 100 });
+    setTimeout(() => set({ rebuildProgress: 0 }), 300);
   },
 
   applyPreset: (preset: StylePreset) => {
@@ -430,16 +448,12 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     get().executeCommand(createUpdateCaptionStyleCommand(style, project.captionTrack.style));
   },
 
-  // ─── B-Roll ───────────────────────────────────────────────────────
-
   generateBrollCues: () => {
     const project = get().project;
     if (!project) return;
     set({ project: { ...project, state: 'BROLL_READY', brollCues: MOCK_BROLL_CUES } });
     get().markDirty();
   },
-
-  // ─── Jobs ─────────────────────────────────────────────────────────
 
   enqueueJob: (type: ProcessingJob['type']) => enqueueJob(type),
   cancelJob: (id: string) => cancelJob(id),
