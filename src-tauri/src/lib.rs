@@ -50,7 +50,6 @@ fn get_video_metadata(file_path: String) -> Result<VideoMetadata, String> {
     let ffprobe_available = Command::new("which").arg("ffprobe").output().map(|o| o.status.success()).unwrap_or(false);
     if !ffprobe_available { return Err("ffprobe not found. Install: brew install ffmpeg".to_string()); }
 
-    let size_bytes = std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0);
     let file_name = Path::new(&file_path).file_name().and_then(|n| n.to_str()).unwrap_or("unknown").to_string();
 
     let output = Command::new("ffprobe").args(["-v", "quiet", "-print_format", "json", "-show_streams", "-show_format", &file_path])
@@ -62,11 +61,38 @@ fn get_video_metadata(file_path: String) -> Result<VideoMetadata, String> {
     let streams = json["streams"].as_array().ok_or("No streams found")?;
     let video_stream = streams.iter().find(|s| s["codec_type"].as_str() == Some("video")).ok_or("No video stream found")?;
 
-    let width  = video_stream["width"].as_u64().unwrap_or(0) as u32;
-    let height = video_stream["height"].as_u64().unwrap_or(0) as u32;
+    let mut width  = video_stream["width"].as_u64().unwrap_or(0) as u32;
+    let mut height = video_stream["height"].as_u64().unwrap_or(0) as u32;
     let codec  = video_stream["codec_name"].as_str().unwrap_or("unknown").to_string();
     let fps    = parse_fps(video_stream["r_frame_rate"].as_str().unwrap_or("30/1"));
-    let duration_secs = video_stream["duration"].as_str().or_else(|| json["format"]["duration"].as_str()).and_then(|d| d.parse::<f64>().ok()).unwrap_or(0.0);
+
+    // Tratar rotação de celular (iPhone/Android gravam na horizontal com tag de rotação)
+    if let Some(side_data_list) = video_stream["side_data_list"].as_array() {
+        for side_data in side_data_list {
+            if let Some(rotation) = side_data["rotation"].as_i64() {
+                let r = rotation.abs();
+                if r == 90 || r == 270 {
+                    std::mem::swap(&mut width, &mut height);
+                }
+                break;
+            }
+        }
+    }
+
+    // Duração: tentar stream primeiro, depois format (ambos podem ser string no ffprobe)
+    let parse_duration = |val: &serde_json::Value| -> Option<f64> {
+        val.as_str().and_then(|s| s.parse::<f64>().ok())
+            .or_else(|| val.as_f64())
+    };
+
+    let duration_secs = parse_duration(&video_stream["duration"])
+        .or_else(|| parse_duration(&json["format"]["duration"]))
+        .unwrap_or(0.0);
+
+    // Tamanho: pegar do format (string) ou do filesystem
+    let size_bytes = json["format"]["size"].as_str()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or_else(|| std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0));
 
     Ok(VideoMetadata { file_path, file_name, duration_ms: (duration_secs * 1000.0) as u64, width, height, fps, codec, size_bytes })
 }
@@ -102,20 +128,18 @@ fn generate_proxy(video_path: String, output_dir: String) -> Result<ProcessingRe
     Ok(ProcessingResult { output_path, duration_ms, size_bytes })
 }
 
-// ─── NOVO: O EXTIRPADOR DE THUMBNAILS (NÍVEL NLE PRO) ───
 #[tauri::command]
 fn generate_thumbnails(video_path: String, output_dir: String) -> Result<ProcessingResult, String> {
     let thumbs_dir = format!("{}/thumbs", output_dir);
     std::fs::create_dir_all(&thumbs_dir).map_err(|e| format!("Failed to create thumbs dir: {}", e))?;
 
-    // Extrai 1 imagem JPG por segundo do vídeo em baixíssima qualidade/peso para a timeline
     let output_pattern = format!("{}/thumb_%04d.jpg", thumbs_dir);
     
     let result = Command::new("ffmpeg")
         .args([
             "-y", "-i", &video_path,
-            "-vf", "fps=1,scale=160:-1", // 1 frame por sec, largura 160px
-            "-q:v", "5", // Compressão alta para não pesar
+            "-vf", "fps=1,scale=160:-1",
+            "-q:v", "5",
             &output_pattern
         ])
         .output().map_err(|e| format!("Failed to extract thumbnails: {}", e))?;
@@ -268,7 +292,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             get_system_info, get_video_metadata, check_ffmpeg,
-            extract_audio, generate_proxy, generate_thumbnails, // <-- Adicionado!
+            extract_audio, generate_proxy, generate_thumbnails,
             export_video, open_in_finder
         ])
         .run(tauri::generate_context!())
