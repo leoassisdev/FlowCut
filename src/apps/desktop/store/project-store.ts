@@ -10,7 +10,7 @@ import type {
   SemanticTimeline, TimelineCut,
 } from '@/packages/shared-types';
 import { MOCK_PROJECT, MOCK_BROLL_CUES, MOCK_CAPTION_TRACK } from '@/apps/desktop/mocks/mock-data';
-import { getVideoMetadata, extractAudio, generateProxy, generateThumbnails } from '@/apps/desktop/services/tauri-bridge';
+import { getVideoMetadata, extractAudio, generateProxy, generateThumbnails, detectSilences } from '@/apps/desktop/services/tauri-bridge';
 import { transcribeAudio, checkEngineHealth } from '@/apps/desktop/services/local-api-client';
 import {
   type CommandHistory, createCommandHistory, pushCommand,
@@ -34,21 +34,23 @@ const autosaveDebounce = createAutosaveDebounce(3000);
 function generateProjectId(): string { return `project-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`; }
 function getProjectDir(projectId: string): string { return `/tmp/flowcut/projects/${projectId}`; }
 
-function buildInitialTimeline(transcript: Transcript): SemanticTimeline {
-  let totalDurationMs = 0;
-  const cuts: TimelineCut[] = transcript.segments.map((seg) => {
-    const cut: TimelineCut & { volume?: number } = {
-      id: `cut-${seg.id}`, startMs: seg.startMs, endMs: seg.endMs,
-      type: 'keep', sourceSegmentId: seg.id, label: seg.text.slice(0, 40) + '…',
-      volume: 1.0 
-    };
-    totalDurationMs += (seg.endMs - seg.startMs);
-    return cut;
-  });
-  return { id: `timeline-${transcript.id}`, cuts, totalDurationMs, originalDurationMs: totalDurationMs };
+function buildInitialTimeline(transcript: Transcript, videoDurationMs: number): SemanticTimeline {
+  const cuts: TimelineCut[] = [{
+    id: 'cut-full-video',
+    startMs: 0,
+    endMs: videoDurationMs,
+    type: 'keep',
+    sourceSegmentId: 'full',
+    label: 'Vídeo Completo',
+  }];
+  return {
+    id: `timeline-${transcript.id}`,
+    cuts,
+    totalDurationMs: videoDurationMs,
+    originalDurationMs: videoDurationMs,
+  };
 }
 
-// Extensão local para armazenar o diretório de miniaturas na source
 interface SourceVideoExtended extends SourceVideo {
   thumbsDir?: string | null;
 }
@@ -69,8 +71,10 @@ interface ProjectStore {
   seekRequestMs: number | null;
   requestSeek: (ms: number) => void;
   
-  silenceThresholdMs: number;
-  setSilenceThresholdMs: (ms: number) => void;
+  silenceNoiseDb: number;
+  setSilenceNoiseDb: (db: number) => void;
+  silenceMinDuration: number;
+  setSilenceMinDuration: (d: number) => void;
   applyCrossfade: boolean;
   setApplyCrossfade: (apply: boolean) => void;
 
@@ -101,6 +105,7 @@ interface ProjectStore {
   toggleWordRemoval: (wordId: string) => void;
   removeSegment: (segmentId: string) => void;
   rebuildTimeline: () => Promise<void>;
+  applyAutoCut: () => Promise<void>;
   applyPreset: (preset: StylePreset) => void;
   setState: (state: PipelineState) => void;
   generateCaptions: () => void;
@@ -120,8 +125,10 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   seekRequestMs: null,
   requestSeek: (ms: number) => set({ seekRequestMs: ms }),
   
-  silenceThresholdMs: 400,
-  setSilenceThresholdMs: (ms: number) => { set({ silenceThresholdMs: ms }); get().markDirty(); },
+  silenceNoiseDb: -20,
+  setSilenceNoiseDb: (db: number) => set({ silenceNoiseDb: db }),
+  silenceMinDuration: 0.3,
+  setSilenceMinDuration: (d: number) => set({ silenceMinDuration: d }),
   applyCrossfade: true,
   setApplyCrossfade: (apply: boolean) => { set({ applyCrossfade: apply }); get().markDirty(); },
 
@@ -196,8 +203,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     const cuts: TimelineCut[] = [{
       id: `cut-restore-${Date.now()}`, startMs: 0, endMs: originalMs,
       type: 'keep', sourceSegmentId: 'restored', label: 'Vídeo Original Restaurado',
-      volume: 1.0
-    } as any];
+    }];
     set({ project: { ...project, semanticTimeline: { ...project.semanticTimeline, cuts, totalDurationMs: originalMs } } });
     get().markDirty();
   },
@@ -273,7 +279,8 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         if (!engineOk) { set({ importProgress: null }); } else {
           const transcript = await transcribeAudio(projectId, audioPath, 'pt');
           if (transcript) {
-            currentProject = { ...get().project!, state: 'ALIGNED', transcript, semanticTimeline: buildInitialTimeline(transcript) };
+            const videoDurationMs = get().project!.sourceVideo!.durationMs;
+            currentProject = { ...get().project!, state: 'ALIGNED', transcript, semanticTimeline: buildInitialTimeline(transcript, videoDurationMs) };
             set({ project: currentProject });
           } else { set({ project: { ...get().project!, state: 'TRANSCRIBED' } }); }
         }
@@ -305,17 +312,14 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     get().executeCommand(createRemoveSegmentCommand(segmentId, seg?.text ?? ''));
   },
 
-  // ─── A MÁGICA REESCRITA DO AUTO-CUT ───
+  // ─── REBUILD: Reconstrói timeline baseada nas palavras riscadas ───
   rebuildTimeline: async () => {
     const project = get().project;
     if (!project?.transcript || !project.semanticTimeline) return;
 
     set({ isRebuilding: true, rebuildProgress: 0 });
-    for (let i = 1; i <= 10; i++) { await new Promise(r => setTimeout(r, 20)); set({ rebuildProgress: i * 10 }); }
 
-    const threshold = get().silenceThresholdMs; 
-    
-    // Pega todas as palavras que não foram removidas manualmente
+    const originalDurationMs = project.sourceVideo?.durationMs ?? project.semanticTimeline.originalDurationMs;
     const allWords = project.transcript.segments.flatMap(s => s.words).filter(w => !w.isRemoved);
     
     if (allWords.length === 0) {
@@ -324,43 +328,141 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       return;
     }
 
+    allWords.sort((a, b) => a.startMs - b.startMs);
+
     const newCuts: TimelineCut[] = [];
     let currentCutStart = allWords[0].startMs;
     let currentCutEnd = allWords[0].endMs;
     let currentLabel = allWords[0].word;
     let totalDurationMs = 0;
+    let cutIndex = 0;
 
+    // Agrupa palavras consecutivas em cortes (gap > 300ms = novo corte)
     for (let i = 1; i < allWords.length; i++) {
       const w = allWords[i];
       const gap = w.startMs - currentCutEnd;
 
-      if (gap > threshold) {
-        // Encontrou um buraco de silêncio maior que a sensibilidade! Faca nele.
-        newCuts.push({
-          id: `cut-auto-${Date.now()}-${i}`, startMs: currentCutStart, endMs: currentCutEnd,
-          type: 'keep', sourceSegmentId: 'auto', label: currentLabel.length > 40 ? currentLabel.slice(0, 40) + '…' : currentLabel, volume: 1.0
-        } as any);
+      if (gap > 300) {
+        const label = currentLabel.length > 40 ? currentLabel.slice(0, 40) + '…' : currentLabel;
+        newCuts.push({ id: `cut-rebuild-${cutIndex++}`, startMs: currentCutStart, endMs: currentCutEnd, type: 'keep', sourceSegmentId: 'rebuild', label } as TimelineCut);
         totalDurationMs += (currentCutEnd - currentCutStart);
-
-        // O próximo clipe começa na próxima palavra falada
         currentCutStart = w.startMs;
         currentCutEnd = w.endMs;
         currentLabel = w.word;
       } else {
-        // Aglutina a palavra ao clipe atual (sem silêncio perceptível)
         currentCutEnd = w.endMs;
         currentLabel += ` ${w.word}`;
       }
+
+      if (i % Math.max(1, Math.floor(allWords.length / 10)) === 0) {
+        set({ rebuildProgress: Math.round((i / allWords.length) * 90) });
+        await new Promise(r => setTimeout(r, 5));
+      }
     }
     
-    // Salva o último fragmento
-    newCuts.push({
-      id: `cut-auto-final`, startMs: currentCutStart, endMs: currentCutEnd,
-      type: 'keep', sourceSegmentId: 'auto', label: currentLabel.length > 40 ? currentLabel.slice(0, 40) + '…' : currentLabel, volume: 1.0
-    } as any);
+    const lastLabel = currentLabel.length > 40 ? currentLabel.slice(0, 40) + '…' : currentLabel;
+    newCuts.push({ id: `cut-rebuild-${cutIndex}`, startMs: currentCutStart, endMs: currentCutEnd, type: 'keep', sourceSegmentId: 'rebuild', label: lastLabel } as TimelineCut);
     totalDurationMs += (currentCutEnd - currentCutStart);
 
-    set({ project: { ...project, semanticTimeline: { ...project.semanticTimeline, cuts: newCuts, totalDurationMs } } });
+    set({
+      project: {
+        ...project,
+        semanticTimeline: { ...project.semanticTimeline, cuts: newCuts, totalDurationMs, originalDurationMs },
+      },
+    });
+    get().markDirty();
+    set({ isRebuilding: false, rebuildProgress: 100 });
+    setTimeout(() => set({ rebuildProgress: 0 }), 300);
+  },
+
+  // ─── AUTO-CUT: Noise gate real via FFmpeg silencedetect ───
+  applyAutoCut: async () => {
+    const project = get().project;
+    if (!project?.semanticTimeline || !project.sourceVideo) return;
+
+    const filePath = project.sourceVideo.filePath;
+    if (!filePath) return;
+
+    set({ isRebuilding: true, rebuildProgress: 10 });
+
+    const noiseDb = get().silenceNoiseDb;
+    const minDuration = get().silenceMinDuration;
+    const videoDurationMs = project.sourceVideo.durationMs;
+    const originalDurationMs = project.semanticTimeline.originalDurationMs || videoDurationMs;
+    const existingCuts = project.semanticTimeline.cuts;
+
+    // Chama o Rust que roda ffmpeg silencedetect no arquivo original
+    const result = await detectSilences(filePath, noiseDb, minDuration);
+
+    if (!result || result.silences.length === 0) {
+      // Nenhum silêncio detectado — mantém os cortes como estão
+      set({ isRebuilding: false, rebuildProgress: 100 });
+      setTimeout(() => set({ rebuildProgress: 0 }), 300);
+      return;
+    }
+
+    set({ rebuildProgress: 60 });
+
+    // Para cada corte existente, remove os trechos de silêncio que caem dentro dele
+    const newCuts: TimelineCut[] = [];
+    let cutIndex = 0;
+    let totalKeptMs = 0;
+
+    for (const cut of existingCuts) {
+      // Encontra silêncios que se sobrepõem a este corte
+      const overlappingSilences = result.silences.filter(
+        s => s.start_ms < cut.endMs && s.end_ms > cut.startMs
+      );
+
+      if (overlappingSilences.length === 0) {
+        // Nenhum silêncio neste corte — mantém inteiro
+        newCuts.push({ ...cut, id: `cut-ac-${cutIndex++}` });
+        totalKeptMs += (cut.endMs - cut.startMs);
+        continue;
+      }
+
+      // Percorre o corte e pula os silêncios
+      let cursor = cut.startMs;
+
+      for (const silence of overlappingSilences) {
+        const silStart = Math.max(silence.start_ms, cut.startMs);
+        const silEnd = Math.min(silence.end_ms, cut.endMs);
+
+        if (cursor < silStart) {
+          // Trecho de fala antes do silêncio
+          newCuts.push({
+            id: `cut-ac-${cutIndex++}`,
+            startMs: cursor,
+            endMs: silStart,
+            type: 'keep',
+            sourceSegmentId: cut.sourceSegmentId,
+            label: cut.label,
+          } as TimelineCut);
+          totalKeptMs += (silStart - cursor);
+        }
+        cursor = silEnd;
+      }
+
+      // Trecho de fala depois do último silêncio
+      if (cursor < cut.endMs) {
+        newCuts.push({
+          id: `cut-ac-${cutIndex++}`,
+          startMs: cursor,
+          endMs: cut.endMs,
+          type: 'keep',
+          sourceSegmentId: cut.sourceSegmentId,
+          label: cut.label,
+        } as TimelineCut);
+        totalKeptMs += (cut.endMs - cursor);
+      }
+    }
+
+    set({
+      project: {
+        ...project,
+        semanticTimeline: { ...project.semanticTimeline, cuts: newCuts, totalDurationMs: totalKeptMs, originalDurationMs },
+      },
+    });
     get().markDirty();
     set({ isRebuilding: false, rebuildProgress: 100 });
     setTimeout(() => set({ rebuildProgress: 0 }), 300);

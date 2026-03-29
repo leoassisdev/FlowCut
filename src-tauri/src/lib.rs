@@ -40,6 +40,20 @@ pub struct ExportRequest {
     pub subtitles: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SilenceInterval {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SilenceDetectionResult {
+    pub silences: Vec<SilenceInterval>,
+    pub total_silence_ms: u64,
+    pub total_duration_ms: u64,
+}
+
 #[derive(Clone, Serialize)]
 struct ProgressPayload {
     progress: u32,
@@ -66,7 +80,6 @@ fn get_video_metadata(file_path: String) -> Result<VideoMetadata, String> {
     let codec  = video_stream["codec_name"].as_str().unwrap_or("unknown").to_string();
     let fps    = parse_fps(video_stream["r_frame_rate"].as_str().unwrap_or("30/1"));
 
-    // Tratar rotação de celular (iPhone/Android gravam na horizontal com tag de rotação)
     if let Some(side_data_list) = video_stream["side_data_list"].as_array() {
         for side_data in side_data_list {
             if let Some(rotation) = side_data["rotation"].as_i64() {
@@ -79,7 +92,6 @@ fn get_video_metadata(file_path: String) -> Result<VideoMetadata, String> {
         }
     }
 
-    // Duração: tentar stream primeiro, depois format (ambos podem ser string no ffprobe)
     let parse_duration = |val: &serde_json::Value| -> Option<f64> {
         val.as_str().and_then(|s| s.parse::<f64>().ok())
             .or_else(|| val.as_f64())
@@ -89,12 +101,94 @@ fn get_video_metadata(file_path: String) -> Result<VideoMetadata, String> {
         .or_else(|| parse_duration(&json["format"]["duration"]))
         .unwrap_or(0.0);
 
-    // Tamanho: pegar do format (string) ou do filesystem
     let size_bytes = json["format"]["size"].as_str()
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or_else(|| std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0));
 
     Ok(VideoMetadata { file_path, file_name, duration_ms: (duration_secs * 1000.0) as u64, width, height, fps, codec, size_bytes })
+}
+
+// ─── DETECÇÃO DE SILÊNCIO VIA FFMPEG (NOISE GATE REAL) ───
+#[tauri::command]
+fn detect_silences(file_path: String, noise_db: f64, min_duration: f64) -> Result<SilenceDetectionResult, String> {
+    let filter = format!("silencedetect=noise={}dB:d={}", noise_db, min_duration);
+
+    let output = Command::new("ffmpeg")
+        .args(["-i", &file_path, "-af", &filter, "-f", "null", "-"])
+        .output()
+        .map_err(|e| format!("Failed to run ffmpeg silencedetect: {}", e))?;
+
+    // silencedetect escreve no stderr do ffmpeg
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    let mut silences: Vec<SilenceInterval> = Vec::new();
+    let mut current_start: Option<f64> = None;
+    let mut total_duration_secs: f64 = 0.0;
+
+    for line in stderr.lines() {
+        if line.contains("silence_start:") {
+            // Formato: [silencedetect @ 0x...] silence_start: 3.72102
+            if let Some(pos) = line.find("silence_start:") {
+                let after = &line[pos + 15..];
+                // Pega só o número (pode ter lixo como "bitrate=..." grudado)
+                let num_str: String = after.chars().take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-').collect();
+                if let Ok(start) = num_str.parse::<f64>() {
+                    current_start = Some(start);
+                }
+            }
+        } else if line.contains("silence_end:") {
+            if let Some(start) = current_start {
+                // Formato: [silencedetect @ 0x...] silence_end: 4.37 | silence_duration: 0.64898
+                if let Some(pos) = line.find("silence_end:") {
+                    let after = &line[pos + 13..];
+                    let num_str: String = after.chars().take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-').collect();
+                    if let Ok(end) = num_str.parse::<f64>() {
+                        let dur = end - start;
+                        silences.push(SilenceInterval {
+                            start_ms: (start * 1000.0) as u64,
+                            end_ms: (end * 1000.0) as u64,
+                            duration_ms: (dur * 1000.0) as u64,
+                        });
+                    }
+                }
+                current_start = None;
+            }
+        }
+        // Captura duração total do arquivo
+        if line.contains("Duration:") {
+            if let Some(pos) = line.find("Duration:") {
+                let after = &line[pos + 10..];
+                let time_str: String = after.chars().take_while(|c| *c != ',').collect();
+                let parts: Vec<&str> = time_str.trim().split(':').collect();
+                if parts.len() == 3 {
+                    let h = parts[0].parse::<f64>().unwrap_or(0.0);
+                    let m = parts[1].parse::<f64>().unwrap_or(0.0);
+                    let s = parts[2].parse::<f64>().unwrap_or(0.0);
+                    total_duration_secs = h * 3600.0 + m * 60.0 + s;
+                }
+            }
+        }
+    }
+
+    // Se o último silêncio não teve silence_end (silêncio até o fim do arquivo)
+    if let Some(start) = current_start {
+        if total_duration_secs > start {
+            let end = total_duration_secs;
+            silences.push(SilenceInterval {
+                start_ms: (start * 1000.0) as u64,
+                end_ms: (end * 1000.0) as u64,
+                duration_ms: ((end - start) * 1000.0) as u64,
+            });
+        }
+    }
+
+    let total_silence_ms: u64 = silences.iter().map(|s| s.duration_ms).sum();
+
+    Ok(SilenceDetectionResult {
+        silences,
+        total_silence_ms,
+        total_duration_ms: (total_duration_secs * 1000.0) as u64,
+    })
 }
 
 #[tauri::command]
@@ -136,12 +230,7 @@ fn generate_thumbnails(video_path: String, output_dir: String) -> Result<Process
     let output_pattern = format!("{}/thumb_%04d.jpg", thumbs_dir);
     
     let result = Command::new("ffmpeg")
-        .args([
-            "-y", "-i", &video_path,
-            "-vf", "fps=1,scale=160:-1",
-            "-q:v", "5",
-            &output_pattern
-        ])
+        .args(["-y", "-i", &video_path, "-vf", "fps=1,scale=160:-1", "-q:v", "5", &output_pattern])
         .output().map_err(|e| format!("Failed to extract thumbnails: {}", e))?;
 
     if !result.status.success() { 
@@ -293,7 +382,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_system_info, get_video_metadata, check_ffmpeg,
             extract_audio, generate_proxy, generate_thumbnails,
-            export_video, open_in_finder
+            detect_silences, export_video, open_in_finder
         ])
         .run(tauri::generate_context!())
         .expect("error while running FlowCut");

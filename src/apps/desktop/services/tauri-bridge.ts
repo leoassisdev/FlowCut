@@ -13,6 +13,9 @@ export interface ExportRequest { source_video_path: string; cuts: TimelineCutInp
 export interface SystemInfo { platform: string; arch: string; version: string; }
 export interface FfmpegStatus { ffmpeg: boolean; ffprobe: boolean; ready: boolean; install_hint: string; }
 
+export interface SilenceInterval { start_ms: number; end_ms: number; duration_ms: number; }
+export interface SilenceDetectionResult { silences: SilenceInterval[]; total_silence_ms: number; total_duration_ms: number; }
+
 export async function pickVideoFile(): Promise<VideoFileInfo | null> {
   if (!IS_TAURI) return { path: '/mock/videos/demo.mp4', name: 'demo.mp4' };
   try {
@@ -47,10 +50,14 @@ export async function generateProxy(videoPath: string, outputDir: string): Promi
   try { const { invoke } = await import('@tauri-apps/api/core'); return await invoke<ProcessingResult>('generate_proxy', { videoPath, outputDir }); } catch (error) { console.error(error); return null; }
 }
 
-// ─── NOVO: Chamada para extrair Thumbnails ───
 export async function generateThumbnails(videoPath: string, outputDir: string): Promise<ProcessingResult | null> {
   if (!IS_TAURI) return { output_path: '/mock/thumbs', duration_ms: 0, size_bytes: 0 };
   try { const { invoke } = await import('@tauri-apps/api/core'); return await invoke<ProcessingResult>('generate_thumbnails', { videoPath, outputDir }); } catch (error) { console.error(error); return null; }
+}
+
+export async function detectSilences(filePath: string, noiseDb: number, minDuration: number): Promise<SilenceDetectionResult | null> {
+  if (!IS_TAURI) return { silences: [], total_silence_ms: 0, total_duration_ms: 185000 };
+  try { const { invoke } = await import('@tauri-apps/api/core'); return await invoke<SilenceDetectionResult>('detect_silences', { filePath, noiseDb, minDuration }); } catch (error) { console.error(error); return null; }
 }
 
 export async function exportVideo(request: ExportRequest): Promise<ProcessingResult | null> {

@@ -39,7 +39,6 @@ export default function ProjectEditorPage() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [activeNav, setActiveNav] = useState('projects');
 
-  // Estado global dos LEDs do Áudio
   const [level, setLevel] = useState(0);
 
   useKeyboardShortcuts();
@@ -48,7 +47,6 @@ export default function ProjectEditorPage() {
     if (projectId && projectId !== 'new') loadProject(projectId);
   }, [projectId]);
 
-  // Captura Global do Volume da Aplicação (Para o Mixer)
   useEffect(() => {
     const handleAudioLevel = (e: Event) => {
       const customEvent = e as CustomEvent;
@@ -58,7 +56,6 @@ export default function ProjectEditorPage() {
     return () => window.removeEventListener('v-audio-level', handleAudioLevel);
   }, []);
 
-  // ─── LÓGICA DO UNDO / REDO (CMD+Z / CMD+SHIFT+Z) ───
   useEffect(() => {
     const handleGlobalKeys = (e: KeyboardEvent) => {
       if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') return;
@@ -144,17 +141,13 @@ export default function ProjectEditorPage() {
 
           <PanelResizeHandle className="w-1.5 bg-[#1c1c20] hover:bg-[#4f6ef7] transition-colors cursor-col-resize flex items-center justify-center flex-shrink-0"><GripVertical className="w-3 h-3 text-[#555]" /></PanelResizeHandle>
 
-          {/* ─── PAINEL DIREITO COM MIXER FIXO ─── */}
           <Panel defaultSize={20} minSize={15} maxSize={30} className="flex flex-col bg-[#0c0c0e]">
-            
-            {/* ABAS SUPERIORES */}
             <div className="flex border-b border-[#1c1c20] flex-shrink-0">
               {RIGHT_TABS.map((tab) => (
                 <button key={tab.id} onClick={() => setRightTab(tab.id)} className={`flex-1 py-2 text-[10px] tracking-wider uppercase transition-colors font-medium ${rightTab === tab.id ? 'text-[#4f6ef7] border-b border-[#4f6ef7] bg-[#4f6ef7]/5' : 'text-[#444] hover:text-[#777]'}`}>{tab.label}</button>
               ))}
             </div>
             
-            {/* CONTEÚDO DAS ABAS */}
             <div className="flex-1 overflow-hidden">
               {rightTab === 'info'     && <VideoInfoPanel video={project.sourceVideo} />}
               {rightTab === 'audio'    && <AutoCutPanel />}
@@ -163,7 +156,6 @@ export default function ProjectEditorPage() {
               {rightTab === 'jobs'     && <JobsPanelEnhanced legacyJobs={project.jobs} />}
             </div>
 
-            {/* ── MIXER FIXO NA BASE DO PAINEL DIREITO ── */}
             <div className="h-[260px] border-t border-[#1c1c20] bg-[#070708] flex-shrink-0 flex flex-col">
                <DigitalMixer audioLevel={level} />
             </div>
@@ -207,24 +199,45 @@ function InfoRow({ label, value }: { label: string, value: string | number }) {
 }
 
 function AutoCutPanel() {
-  const threshold = useProjectStore((s) => s.silenceThresholdMs);
-  const setThreshold = useProjectStore((s) => s.setSilenceThresholdMs);
-  const applyCrossfade = useProjectStore((s) => s.applyCrossfade);
-  const setApplyCrossfade = useProjectStore((s) => s.setApplyCrossfade);
-  const rebuildTimeline = useProjectStore((s) => s.rebuildTimeline);
-  const restoreTimeline = useProjectStore((s) => (s as any).restoreTimeline);
+  const noiseDb = useProjectStore((s) => s.silenceNoiseDb);
+  const setNoiseDb = useProjectStore((s) => s.setSilenceNoiseDb);
+  const minDuration = useProjectStore((s) => s.silenceMinDuration);
+  const setMinDuration = useProjectStore((s) => s.setSilenceMinDuration);
+  const applyAutoCut = useProjectStore((s) => s.applyAutoCut);
+  const restoreTimeline = useProjectStore((s) => s.restoreTimeline);
+  const isRebuilding = useProjectStore((s) => s.isRebuilding);
 
   return (
     <div className="h-full flex flex-col overflow-y-auto p-4 space-y-6">
       <div>
-        <p className="text-[11px] font-semibold text-[#eee] flex items-center gap-2 mb-2"><AudioWaveform className="w-4 h-4 text-primary" /> Auto-Cut Inteligente</p>
-        <p className="text-[10px] text-muted-foreground mb-4 leading-relaxed">Remove buracos na sua fala. Se o vídeo cortar os "S", aumente a margem de segurança.</p>
+        <p className="text-[11px] font-semibold text-[#eee] flex items-center gap-2 mb-2"><AudioWaveform className="w-4 h-4 text-primary" /> Noise Gate (Auto-Cut)</p>
+        <p className="text-[10px] text-muted-foreground mb-4 leading-relaxed">Detecta silêncios reais no áudio e remove automaticamente. Funciona em cima dos cortes existentes.</p>
         
-        <div className="space-y-2">
-          <div className="flex justify-between"><span className="text-[10px] text-[#888]">Limiar de Silêncio</span><span className="text-[10px] font-mono text-primary">{threshold}ms</span></div>
-          <input type="range" min="100" max="1500" step="50" value={threshold} onChange={(e) => setThreshold(Number(e.target.value))} className="w-full accent-primary" />
+        <div className="space-y-2 mb-4">
+          <div className="flex justify-between"><span className="text-[10px] text-[#888]">Limiar de ruído</span><span className="text-[10px] font-mono text-primary">{noiseDb} dB</span></div>
+          <input type="range" min="-40" max="-10" step="1" value={noiseDb} onChange={(e) => setNoiseDb(Number(e.target.value))} className="w-full accent-primary" />
+          <div className="flex justify-between text-[9px] text-[#555]">
+            <span>Sensível (-40dB)</span>
+            <span>Agressivo (-10dB)</span>
+          </div>
         </div>
-        <button onClick={rebuildTimeline} className="w-full mt-4 py-2 text-[11px] font-semibold tracking-wider uppercase bg-[#1a1a24] border border-[#2a2a35] text-[#eee] hover:bg-primary/20 hover:border-primary hover:text-primary rounded transition-all">Aplicar Cortes</button>
+
+        <div className="space-y-2">
+          <div className="flex justify-between"><span className="text-[10px] text-[#888]">Duração mínima</span><span className="text-[10px] font-mono text-primary">{minDuration.toFixed(1)}s</span></div>
+          <input type="range" min="0.1" max="2.0" step="0.1" value={minDuration} onChange={(e) => setMinDuration(Number(e.target.value))} className="w-full accent-primary" />
+          <div className="flex justify-between text-[9px] text-[#555]">
+            <span>Curto (0.1s)</span>
+            <span>Longo (2.0s)</span>
+          </div>
+        </div>
+
+        <button 
+          onClick={applyAutoCut} 
+          disabled={isRebuilding}
+          className="w-full mt-4 py-2 text-[11px] font-semibold tracking-wider uppercase bg-[#1a1a24] border border-[#2a2a35] text-[#eee] hover:bg-primary/20 hover:border-primary hover:text-primary rounded transition-all disabled:opacity-50 disabled:pointer-events-none"
+        >
+          {isRebuilding ? 'Detectando silêncios...' : 'Aplicar Auto-Cut'}
+        </button>
       </div>
 
       <div className="pt-6 border-t border-[#1c1c20]">
@@ -234,7 +247,6 @@ function AutoCutPanel() {
   );
 }
 
-// ── O Mixer Fixo ──
 function DigitalMixer({ audioLevel }: { audioLevel: number }) {
   const masterVolume = useProjectStore((s) => s.masterVolume);
   const setMasterVolume = useProjectStore((s) => s.setMasterVolume);
@@ -290,10 +302,8 @@ function MixerFader({ label, value, onChange, disabled, audioLevel, isMaster = f
           </div>
         </div>
         
-        {/* LED PROFISSIONAL COM DEGRADÊ E CLIPPING MASK */}
         <div className="w-2 h-full bg-[#111] border border-[#222] rounded-sm overflow-hidden flex flex-col relative">
           <div className="absolute inset-0 w-full h-full opacity-30 z-20" style={{ backgroundImage: 'repeating-linear-gradient(to bottom, #555, #555 1px, transparent 1px, transparent 4px)' }} />
-          {/* A Barra Colorida Completa sendo revelada de baixo pra cima */}
           <div 
             className="absolute inset-0 w-full h-full transition-all duration-75 ease-out z-10" 
             style={{ 
