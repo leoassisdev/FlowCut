@@ -12,7 +12,6 @@ export interface TimelineCutInput { start_ms: number; end_ms: number; }
 export interface ExportRequest { source_video_path: string; cuts: TimelineCutInput[]; output_path: string; width: number; height: number; fps: number; quality: 'high' | 'medium' | 'ultra'; subtitles?: string; }
 export interface SystemInfo { platform: string; arch: string; version: string; }
 export interface FfmpegStatus { ffmpeg: boolean; ffprobe: boolean; ready: boolean; install_hint: string; }
-
 export interface SilenceInterval { start_ms: number; end_ms: number; duration_ms: number; }
 export interface SilenceDetectionResult { silences: SilenceInterval[]; total_silence_ms: number; total_duration_ms: number; }
 
@@ -60,9 +59,16 @@ export async function detectSilences(filePath: string, noiseDb: number, minDurat
   try { const { invoke } = await import('@tauri-apps/api/core'); return await invoke<SilenceDetectionResult>('detect_silences', { filePath, noiseDb, minDuration }); } catch (error) { console.error(error); return null; }
 }
 
-export async function exportVideo(request: ExportRequest): Promise<ProcessingResult | null> {
-  if (!IS_TAURI) { await new Promise((r) => setTimeout(r, 2000)); return { output_path: `/tmp/flowcut/exports/export_mock.mp4`, duration_ms: 5000, size_bytes: 10_000_000 }; }
-  try { const { invoke } = await import('@tauri-apps/api/core'); return await invoke<ProcessingResult>('export_video', { request }); } catch (error) { console.error(error); return null; }
+// ─── MÁGICA AQUI: O ENGOLIDOR DE ERROS FOI REMOVIDO ───
+export async function exportVideo(request: ExportRequest): Promise<ProcessingResult> {
+  if (!IS_TAURI) { 
+    await new Promise((r) => setTimeout(r, 2000)); 
+    return { output_path: `/tmp/flowcut/exports/export_mock.mp4`, duration_ms: 5000, size_bytes: 10_000_000 }; 
+  }
+  
+  // Agora, se o Rust der erro, a função vai explodir uma exceção que o React vai capturar!
+  const { invoke } = await import('@tauri-apps/api/core');
+  return await invoke<ProcessingResult>('export_video', { request });
 }
 
 export async function checkFfmpeg(): Promise<FfmpegStatus> {

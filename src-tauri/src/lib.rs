@@ -3,6 +3,8 @@ use std::process::Command;
 use std::path::Path;
 use tauri::Emitter;
 
+// ─── Types ───────────────────────────────────────────────────────────────────
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VideoMetadata {
     pub file_path: String,
@@ -59,6 +61,8 @@ struct ProgressPayload {
     progress: u32,
 }
 
+// ─── Commands ────────────────────────────────────────────────────────────────
+
 #[tauri::command]
 fn get_video_metadata(file_path: String) -> Result<VideoMetadata, String> {
     let ffprobe_available = Command::new("which").arg("ffprobe").output().map(|o| o.status.success()).unwrap_or(false);
@@ -108,89 +112,6 @@ fn get_video_metadata(file_path: String) -> Result<VideoMetadata, String> {
     Ok(VideoMetadata { file_path, file_name, duration_ms: (duration_secs * 1000.0) as u64, width, height, fps, codec, size_bytes })
 }
 
-// ─── DETECÇÃO DE SILÊNCIO VIA FFMPEG (NOISE GATE REAL) ───
-#[tauri::command]
-fn detect_silences(file_path: String, noise_db: f64, min_duration: f64) -> Result<SilenceDetectionResult, String> {
-    let filter = format!("silencedetect=noise={}dB:d={}", noise_db, min_duration);
-
-    let output = Command::new("ffmpeg")
-        .args(["-i", &file_path, "-af", &filter, "-f", "null", "-"])
-        .output()
-        .map_err(|e| format!("Failed to run ffmpeg silencedetect: {}", e))?;
-
-    // silencedetect escreve no stderr do ffmpeg
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    let mut silences: Vec<SilenceInterval> = Vec::new();
-    let mut current_start: Option<f64> = None;
-    let mut total_duration_secs: f64 = 0.0;
-
-    for line in stderr.lines() {
-        if line.contains("silence_start:") {
-            // Formato: [silencedetect @ 0x...] silence_start: 3.72102
-            if let Some(pos) = line.find("silence_start:") {
-                let after = &line[pos + 15..];
-                // Pega só o número (pode ter lixo como "bitrate=..." grudado)
-                let num_str: String = after.chars().take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-').collect();
-                if let Ok(start) = num_str.parse::<f64>() {
-                    current_start = Some(start);
-                }
-            }
-        } else if line.contains("silence_end:") {
-            if let Some(start) = current_start {
-                // Formato: [silencedetect @ 0x...] silence_end: 4.37 | silence_duration: 0.64898
-                if let Some(pos) = line.find("silence_end:") {
-                    let after = &line[pos + 13..];
-                    let num_str: String = after.chars().take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-').collect();
-                    if let Ok(end) = num_str.parse::<f64>() {
-                        let dur = end - start;
-                        silences.push(SilenceInterval {
-                            start_ms: (start * 1000.0) as u64,
-                            end_ms: (end * 1000.0) as u64,
-                            duration_ms: (dur * 1000.0) as u64,
-                        });
-                    }
-                }
-                current_start = None;
-            }
-        }
-        // Captura duração total do arquivo
-        if line.contains("Duration:") {
-            if let Some(pos) = line.find("Duration:") {
-                let after = &line[pos + 10..];
-                let time_str: String = after.chars().take_while(|c| *c != ',').collect();
-                let parts: Vec<&str> = time_str.trim().split(':').collect();
-                if parts.len() == 3 {
-                    let h = parts[0].parse::<f64>().unwrap_or(0.0);
-                    let m = parts[1].parse::<f64>().unwrap_or(0.0);
-                    let s = parts[2].parse::<f64>().unwrap_or(0.0);
-                    total_duration_secs = h * 3600.0 + m * 60.0 + s;
-                }
-            }
-        }
-    }
-
-    // Se o último silêncio não teve silence_end (silêncio até o fim do arquivo)
-    if let Some(start) = current_start {
-        if total_duration_secs > start {
-            let end = total_duration_secs;
-            silences.push(SilenceInterval {
-                start_ms: (start * 1000.0) as u64,
-                end_ms: (end * 1000.0) as u64,
-                duration_ms: ((end - start) * 1000.0) as u64,
-            });
-        }
-    }
-
-    let total_silence_ms: u64 = silences.iter().map(|s| s.duration_ms).sum();
-
-    Ok(SilenceDetectionResult {
-        silences,
-        total_silence_ms,
-        total_duration_ms: (total_duration_secs * 1000.0) as u64,
-    })
-}
-
 #[tauri::command]
 fn extract_audio(video_path: String, output_dir: String) -> Result<ProcessingResult, String> {
     std::fs::create_dir_all(&output_dir).map_err(|e| format!("Failed to create output dir: {}", e))?;
@@ -223,96 +144,169 @@ fn generate_proxy(video_path: String, output_dir: String) -> Result<ProcessingRe
 }
 
 #[tauri::command]
-fn generate_thumbnails(video_path: String, output_dir: String) -> Result<ProcessingResult, String> {
-    let thumbs_dir = format!("{}/thumbs", output_dir);
-    std::fs::create_dir_all(&thumbs_dir).map_err(|e| format!("Failed to create thumbs dir: {}", e))?;
+fn detect_silences(file_path: String, noise_db: f64, min_duration: f64) -> Result<SilenceDetectionResult, String> {
+    let filter = format!("silencedetect=noise={}dB:d={}", noise_db, min_duration);
+    let output = Command::new("ffmpeg")
+        .args(["-i", &file_path, "-af", &filter, "-f", "null", "-"])
+        .output()
+        .map_err(|e| format!("Failed to run ffmpeg silencedetect: {}", e))?;
 
-    let output_pattern = format!("{}/thumb_%04d.jpg", thumbs_dir);
-    
-    let result = Command::new("ffmpeg")
-        .args(["-y", "-i", &video_path, "-vf", "fps=1,scale=160:-1", "-q:v", "5", &output_pattern])
-        .output().map_err(|e| format!("Failed to extract thumbnails: {}", e))?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut silences: Vec<SilenceInterval> = Vec::new();
+    let mut current_start: Option<f64> = None;
+    let mut total_duration_secs: f64 = 0.0;
 
-    if !result.status.success() { 
-        return Err(format!("ffmpeg thumbnails error: {}", String::from_utf8_lossy(&result.stderr))); 
+    for line in stderr.lines() {
+        if line.contains("silence_start:") {
+            if let Some(pos) = line.find("silence_start:") {
+                let after = &line[pos + 15..];
+                let num_str: String = after.chars().take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-').collect();
+                if let Ok(start) = num_str.parse::<f64>() { current_start = Some(start); }
+            }
+        } else if line.contains("silence_end:") {
+            if let Some(start) = current_start {
+                if let Some(pos) = line.find("silence_end:") {
+                    let after = &line[pos + 13..];
+                    let num_str: String = after.chars().take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-').collect();
+                    if let Ok(end) = num_str.parse::<f64>() {
+                        let dur = end - start;
+                        silences.push(SilenceInterval {
+                            start_ms: (start * 1000.0) as u64,
+                            end_ms: (end * 1000.0) as u64,
+                            duration_ms: (dur * 1000.0) as u64,
+                        });
+                    }
+                }
+                current_start = None;
+            }
+        }
+        
+        if line.contains("Duration:") {
+            if let Some(pos) = line.find("Duration:") {
+                let after = &line[pos + 10..];
+                let time_str: String = after.chars().take_while(|c| *c != ',').collect();
+                let parts: Vec<&str> = time_str.trim().split(':').collect();
+                if parts.len() == 3 {
+                    let h = parts[0].parse::<f64>().unwrap_or(0.0);
+                    let m = parts[1].parse::<f64>().unwrap_or(0.0);
+                    let s = parts[2].parse::<f64>().unwrap_or(0.0);
+                    total_duration_secs = h * 3600.0 + m * 60.0 + s;
+                }
+            }
+        }
     }
 
-    Ok(ProcessingResult { output_path: thumbs_dir, duration_ms: 0, size_bytes: 0 })
+    if let Some(start) = current_start {
+        if total_duration_secs > start {
+            let end = total_duration_secs;
+            silences.push(SilenceInterval {
+                start_ms: (start * 1000.0) as u64,
+                end_ms: (end * 1000.0) as u64,
+                duration_ms: ((end - start) * 1000.0) as u64,
+            });
+        }
+    }
+
+    let total_silence_ms: u64 = silences.iter().map(|s| s.duration_ms).sum();
+
+    Ok(SilenceDetectionResult {
+        silences,
+        total_silence_ms,
+        total_duration_ms: (total_duration_secs * 1000.0) as u64,
+    })
 }
 
+// ─── EXPORTAÇÃO INTELIGENTE (SEM FILTRO DE LEGENDA / MUXING NATIVO) ───
 #[tauri::command]
 fn export_video(app: tauri::AppHandle, request: ExportRequest) -> Result<ProcessingResult, String> {
-    if request.cuts.is_empty() { return Err("No cuts provided for export".to_string()); }
+    if request.cuts.is_empty() { return Err("A timeline está vazia. Não há nada para exportar.".to_string()); }
 
     if let Some(parent) = Path::new(&request.output_path).parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create output dir: {}", e))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("Falha ao criar diretório de destino: {}", e))?;
     }
 
-    let tmp_dir = format!("{}_segments", request.output_path);
-    std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("Failed to create tmp dir: {}", e))?;
+    let tmp_dir = format!("{}_tmp", request.output_path);
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("Falha ao criar diretório temporário: {}", e))?;
 
     let _ = app.emit("export-progress", ProgressPayload { progress: 5 });
 
-    let mut srt_filter = None;
+    let mut has_subtitles = false;
     if let Some(srt_content) = &request.subtitles {
-        let safe_srt_path = "/tmp/flowcut_subs.srt";
-        std::fs::write(safe_srt_path, srt_content).map_err(|e| format!("Failed to write SRT file: {}", e))?;
-        srt_filter = Some(format!("subtitles={}", safe_srt_path)); 
+        let srt_path = format!("{}/subs.srt", tmp_dir);
+        std::fs::write(&srt_path, srt_content).map_err(|e| format!("Falha ao gravar arquivo de legendas: {}", e))?;
+        has_subtitles = true;
     }
 
-    let mut segment_paths: Vec<String> = Vec::new();
-    let total_cuts = request.cuts.len();
+    let concat_path = format!("{}/concat.txt", tmp_dir);
+    let mut concat_content = String::new();
 
-    for (i, cut) in request.cuts.iter().enumerate() {
-        let seg_path = format!("{}/seg_{:04}.mp4", tmp_dir, i);
+    for cut in &request.cuts {
         let start_secs = cut.start_ms as f64 / 1000.0;
-        let duration_secs = (cut.end_ms - cut.start_ms) as f64 / 1000.0;
+        let end_secs = cut.end_ms as f64 / 1000.0;
+        if end_secs <= start_secs { continue; }
 
-        if duration_secs <= 0.0 { continue; }
-
-        let result = Command::new("ffmpeg")
-            .args(["-y", "-ss", &format!("{:.3}", start_secs), "-i", &request.source_video_path, "-t", &format!("{:.3}", duration_secs), "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-c:a", "aac", "-b:a", "192k", "-avoid_negative_ts", "make_zero", &seg_path])
-            .output().map_err(|e| format!("Failed to extract segment {}: {}", i, e))?;
-
-        if !result.status.success() {
-            let _ = std::fs::remove_dir_all(&tmp_dir);
-            return Err(format!("ffmpeg segment {} error: {}", i, String::from_utf8_lossy(&result.stderr)));
-        }
-        segment_paths.push(seg_path);
-
-        let pct = 5 + ((i as f32 / total_cuts as f32) * 75.0) as u32;
-        let _ = app.emit("export-progress", ProgressPayload { progress: pct });
+        concat_content.push_str(&format!("file '{}'\n", request.source_video_path));
+        concat_content.push_str(&format!("inpoint {:.3}\n", start_secs));
+        concat_content.push_str(&format!("outpoint {:.3}\n", end_secs));
     }
 
-    if segment_paths.is_empty() {
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-        return Err("No valid segments extracted".to_string());
-    }
+    std::fs::write(&concat_path, concat_content).map_err(|e| format!("Falha ao gerar lista de cortes (concat.txt): {}", e))?;
 
+    let _ = app.emit("export-progress", ProgressPayload { progress: 15 });
     let (crf, preset) = quality_params(&request.quality);
-    let _ = app.emit("export-progress", ProgressPayload { progress: 85 });
 
     let mut cmd = Command::new("ffmpeg");
     cmd.current_dir(&tmp_dir);
 
-    if segment_paths.len() == 1 {
-        let mut args = vec!["-y".to_string(), "-i".to_string(), "seg_0000.mp4".to_string()];
-        if let Some(ref srt) = srt_filter { args.push("-vf".to_string()); args.push(srt.clone()); }
-        args.extend(["-c:v".to_string(), "libx264".to_string(), "-preset".to_string(), preset.to_string(), "-crf".to_string(), crf.to_string(), "-c:a".to_string(), "aac".to_string(), "-b:a".to_string(), "192k".to_string(), request.output_path.clone()]);
-        
-        let result = cmd.args(&args).output().map_err(|e| format!("Failed to finalize export: {}", e))?;
-        if !result.status.success() { let _ = std::fs::remove_dir_all(&tmp_dir); return Err(format!("ffmpeg finalize error: {}", String::from_utf8_lossy(&result.stderr))); }
-    } else {
-        let concat_list_path = format!("{}/concat.txt", tmp_dir);
-        let concat_content = segment_paths.iter().enumerate().map(|(i, _)| format!("file 'seg_{:04}.mp4'\n", i)).collect::<String>();
-        std::fs::write(&concat_list_path, concat_content).map_err(|e| format!("Failed to write concat list: {}", e))?;
+    // MÁGICA DE EXPORTAÇÃO SEGURA: Muxar as legendas nativamente em vez de usar o filter_graph!
+    let mut args = vec![
+        "-y".to_string(), 
+        "-f".to_string(), "concat".to_string(), 
+        "-safe".to_string(), "0".to_string(), 
+        "-i".to_string(), "concat.txt".to_string()
+    ];
+    
+    // Se tiver legenda, adiciona ela como um INPUT separado (embutir no MP4)
+    if has_subtitles { 
+        args.push("-i".to_string()); 
+        args.push("subs.srt".to_string()); 
+    }
+    
+    args.extend([
+        "-map".to_string(), "0:v".to_string(), // Pega apenas a faixa de vídeo do original
+        "-map".to_string(), "0:a?".to_string(), // Pega apenas a faixa de áudio
+    ]);
 
-        let mut args = vec!["-y".to_string(), "-f".to_string(), "concat".to_string(), "-safe".to_string(), "0".to_string(), "-i".to_string(), "concat.txt".to_string()];
-        if let Some(ref srt) = srt_filter { args.push("-vf".to_string()); args.push(srt.clone()); }
-        args.extend(["-c:v".to_string(), "libx264".to_string(), "-preset".to_string(), preset.to_string(), "-crf".to_string(), crf.to_string(), "-c:a".to_string(), "aac".to_string(), "-b:a".to_string(), "192k".to_string(), request.output_path.clone()]);
+    // Se tiver legenda, mapeia a legenda do input secundário
+    if has_subtitles {
+        args.extend(["-map".to_string(), "1:0".to_string()]); 
+    }
 
-        let result = cmd.args(&args).output().map_err(|e| format!("Failed to concatenate segments: {}", e))?;
-        if !result.status.success() { let _ = std::fs::remove_dir_all(&tmp_dir); return Err(format!("ffmpeg concat error: {}", String::from_utf8_lossy(&result.stderr))); }
+    args.extend([
+        "-c:v".to_string(), "libx264".to_string(), 
+        "-preset".to_string(), preset.to_string(), 
+        "-crf".to_string(), crf.to_string(), 
+        "-c:a".to_string(), "aac".to_string(), 
+        "-b:a".to_string(), "192k".to_string(), 
+    ]);
+
+    // Avisa que o codec da legenda será compatível com container MP4
+    if has_subtitles {
+        args.extend(["-c:s".to_string(), "mov_text".to_string()]); 
+    }
+
+    args.extend([
+        request.output_path.clone()
+    ]);
+
+    let _ = app.emit("export-progress", ProgressPayload { progress: 40 });
+    
+    let result = cmd.args(&args).output().map_err(|e| format!("Falha ao invocar o FFmpeg no sistema: {}", e))?;
+    
+    if !result.status.success() { 
+        let error_log = String::from_utf8_lossy(&result.stderr);
+        let _ = std::fs::remove_dir_all(&tmp_dir); 
+        return Err(format!("Erro interno do FFmpeg:\n{}", error_log)); 
     }
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
@@ -342,6 +336,8 @@ fn check_ffmpeg() -> serde_json::Value {
 fn get_system_info() -> serde_json::Value {
     serde_json::json!({ "platform": std::env::consts::OS, "arch": std::env::consts::ARCH, "version": env!("CARGO_PKG_VERSION") })
 }
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 fn parse_fps(fps_str: &str) -> f64 {
     let parts: Vec<&str> = fps_str.split('/').collect();
@@ -381,8 +377,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             get_system_info, get_video_metadata, check_ffmpeg,
-            extract_audio, generate_proxy, generate_thumbnails,
-            detect_silences, export_video, open_in_finder
+            extract_audio, generate_proxy, detect_silences,
+            export_video, open_in_finder
         ])
         .run(tauri::generate_context!())
         .expect("error while running FlowCut");

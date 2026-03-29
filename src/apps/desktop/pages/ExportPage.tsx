@@ -26,6 +26,8 @@ export default function ExportPage() {
   const [isExporting, setIsExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
   const [exportSuccess, setExportSuccess] = useState(false);
+  
+  // Alterado para mostrar erros detalhados
   const [error, setError] = useState<string | null>(null);
 
   if (!project) {
@@ -46,7 +48,6 @@ export default function ExportPage() {
       setExportSuccess(false);
       setExportProgress(0);
 
-      // Escuta o progresso do FFmpeg pelo Rust
       const { listen } = await import('@tauri-apps/api/event');
       unlisten = await listen('export-progress', (event: any) => {
         setExportProgress(event.payload.progress);
@@ -74,7 +75,7 @@ export default function ExportPage() {
         subtitlesStr = srt;
       }
 
-      const defaultName = `${project.name.replace(/[^a-z0-9]/gi, '_').toLowerCase()}_final.mp4`;
+      const defaultName = `${project.name.replace(/[^a-z0-9A-Z]/gi, '_').toLowerCase()}_final.mp4`;
       const outputPath = await pickExportPath(defaultName);
 
       if (!outputPath) {
@@ -93,17 +94,21 @@ export default function ExportPage() {
         subtitles: subtitlesStr,
       });
 
-      if (!result) throw new Error("Falha ao exportar vídeo.");
+      if (!result) throw new Error("O Rust não retornou resposta. O processo pode ter morrido.");
 
       setExportProgress(100);
       setExportSuccess(true);
       
-      // Abre o Finder no final!
       await openInFinder(outputPath);
 
     } catch (err: any) {
-      console.error(err);
-      setError(err.message || "Erro desconhecido ao exportar o projeto.");
+      console.error("DEBUG EXPORT:", err);
+      
+      // MÁGICA: O Tauri manda o erro como uma string crua vinda do Rust. 
+      // Agora o React vai mostrar na tela sem mascarar!
+      const errorMessage = typeof err === 'string' ? err : (err.message || "Erro desconhecido ao exportar o projeto.");
+      setError(errorMessage);
+      
     } finally {
       setIsExporting(false);
       if (unlisten) unlisten();
@@ -181,16 +186,22 @@ export default function ExportPage() {
             </div>
 
             {error && (
-              <div className="p-4 bg-destructive/10 text-destructive rounded-lg flex items-center gap-3 text-sm">
-                <AlertCircle className="w-5 h-5 shrink-0" />
-                <p>{error}</p>
+              <div className="p-4 bg-destructive/10 border border-destructive/20 text-destructive rounded-lg flex flex-col gap-2 text-sm overflow-hidden">
+                <div className="flex items-center gap-2 font-bold">
+                  <AlertCircle className="w-5 h-5 shrink-0" />
+                  <span>Erro de Renderização</span>
+                </div>
+                {/* Aqui está o dedurador oficial do FFmpeg */}
+                <pre className="text-[10px] font-mono bg-black/20 p-2 rounded max-h-40 overflow-y-auto whitespace-pre-wrap">
+                  {error}
+                </pre>
               </div>
             )}
 
             {exportSuccess && (
               <div className="p-4 bg-emerald-500/10 text-emerald-500 rounded-lg flex items-center gap-3 text-sm">
                 <CheckCircle2 className="w-5 h-5 shrink-0" />
-                <p>Vídeo com legendas exportado com sucesso!</p>
+                <p>Vídeo exportado com sucesso! A pasta deve ter aberto automaticamente.</p>
               </div>
             )}
 
@@ -198,7 +209,7 @@ export default function ExportPage() {
               {isExporting && (
                 <div className="w-full space-y-2 mb-4">
                   <div className="flex justify-between text-sm text-muted-foreground font-mono">
-                    <span>Exportando...</span>
+                    <span>Renderizando...</span>
                     <span>{exportProgress}%</span>
                   </div>
                   <div className="w-full h-3 bg-muted rounded-full overflow-hidden">
@@ -211,7 +222,7 @@ export default function ExportPage() {
               )}
               <Button size="lg" className="w-full gap-2 text-base h-14" onClick={handleExport} disabled={isExporting}>
                 <Download className="w-5 h-5" />
-                {isExporting ? 'Processando...' : 'Iniciar Exportação'}
+                {isExporting ? 'Processando (Isso pode demorar um pouco)...' : 'Iniciar Exportação'}
               </Button>
             </div>
             

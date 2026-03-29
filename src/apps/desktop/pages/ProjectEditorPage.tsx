@@ -12,7 +12,7 @@ import JobsPanelEnhanced from '@/apps/desktop/components/JobsPanelEnhanced';
 import EditorToolbar from '@/apps/desktop/components/EditorToolbar';
 import AIAssistant from '@/apps/desktop/components/AIAssistant';
 import type { SourceVideo } from '@/packages/shared-types';
-import { Home, FolderOpen, Sliders, Film, Download, Settings, GripVertical, GripHorizontal, AudioWaveform, Info, Volume2 } from 'lucide-react';
+import { Home, FolderOpen, Sliders, Film, Download, Settings, GripVertical, GripHorizontal, AudioWaveform, Info, Volume2, Scissors } from 'lucide-react';
 
 const NAV_ITEMS = [
   { id: 'home',     icon: Home,       label: 'Home' },
@@ -24,18 +24,19 @@ const NAV_ITEMS = [
 
 const RIGHT_TABS = [
   { id: 'info',     label: 'Info' },
-  { id: 'audio',    label: 'Auto-Cut' },
   { id: 'presets',  label: 'Presets' },
-  { id: 'captions', label: 'Captions' },
+  { id: 'captions', label: 'Legendas' }, // Renomeado!
   { id: 'jobs',     label: 'Jobs' },
 ];
 
 export default function ProjectEditorPage() {
   const { projectId } = useParams<{ projectId: string }>();
-  const { project, isLoading, loadProject, undo, redo } = useProjectStore();
+  const { project, isLoading, loadProject, undo, redo, setIsPlaying, requestSeek } = useProjectStore();
   const navigate = useNavigate();
+  
   const [rightTab, setRightTab] = useState('info');
-  const [bottomTab, setBottomTab] = useState<'timeline' | 'logs'>('timeline');
+  // Adicionado o estado 'autocut' nas abas inferiores
+  const [bottomTab, setBottomTab] = useState<'timeline' | 'logs' | 'autocut'>('timeline');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [activeNav, setActiveNav] = useState('projects');
 
@@ -58,7 +59,10 @@ export default function ProjectEditorPage() {
 
   useEffect(() => {
     const handleGlobalKeys = (e: KeyboardEvent) => {
-      if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') return;
+      const activeTag = document.activeElement?.tagName;
+      if (activeTag === 'INPUT' || activeTag === 'TEXTAREA') return;
+      
+      // Atalho: Undo / Redo
       if (e.metaKey || e.ctrlKey) {
         if (e.key.toLowerCase() === 'z') {
           e.preventDefault();
@@ -66,10 +70,27 @@ export default function ProjectEditorPage() {
           else undo();
         }
       }
+      
+      // Atalho CapCut/LogicPro: Shift + Space (Play a partir do corte selecionado)
+      if (e.code === 'Space') {
+        e.preventDefault();
+        const state = useProjectStore.getState();
+        const selectedId = state.selectedCutId;
+        const isPlaying = state.isPlaying;
+        
+        if (e.shiftKey && selectedId) {
+          const cut = state.project?.semanticTimeline?.cuts.find(c => c.id === selectedId);
+          if (cut) {
+             requestSeek(cut.startMs);
+             if (!isPlaying) setIsPlaying(true);
+             return;
+          }
+        }
+      }
     };
     window.addEventListener('keydown', handleGlobalKeys);
     return () => window.removeEventListener('keydown', handleGlobalKeys);
-  }, [undo, redo]);
+  }, [undo, redo, requestSeek, setIsPlaying]);
 
   const handleNavClick = useCallback((id: string) => {
     if (id === 'home') { navigate('/'); return; }
@@ -128,13 +149,32 @@ export default function ProjectEditorPage() {
 
               <Panel defaultSize={30} minSize={15} className="flex flex-col bg-[#090909]">
                 <div className="h-7 flex items-center border-b border-[#1c1c20] px-3 gap-0 flex-shrink-0 bg-[#090909]">
-                  {(['timeline', 'logs'] as const).map((tab) => (
-                    <button key={tab} onClick={() => setBottomTab(tab)} className={`px-3 h-full text-[10px] tracking-widest uppercase transition-colors ${bottomTab === tab ? 'text-[#ccc] border-b border-[#4f6ef7]' : 'text-[#333] hover:text-[#666]'}`}>{tab}</button>
-                  ))}
+                  <button onClick={() => setBottomTab('timeline')} className={`px-3 h-full text-[10px] tracking-widest uppercase transition-colors ${bottomTab === 'timeline' ? 'text-[#ccc] border-b border-[#4f6ef7]' : 'text-[#333] hover:text-[#666]'}`}>
+                    TIMELINE
+                  </button>
+                  <button onClick={() => setBottomTab('logs')} className={`px-3 h-full text-[10px] tracking-widest uppercase transition-colors ${bottomTab === 'logs' ? 'text-[#ccc] border-b border-[#4f6ef7]' : 'text-[#333] hover:text-[#666]'}`}>
+                    LOGS
+                  </button>
+                  
+                  <div className="w-px h-3 bg-[#1c1c20] mx-1" />
+                  
+                  <button onClick={() => setBottomTab('autocut')} className={`px-3 h-full text-[10px] tracking-widest uppercase transition-colors ${bottomTab === 'autocut' ? 'text-[#10b981] border-b border-[#10b981]' : 'text-[#333] hover:text-[#666]'}`}>
+                    REMOVER SILÊNCIOS
+                  </button>
+
                   <div className="flex-1" />
                   <span className="text-[10px] font-mono text-[#2a2a35]">{Math.floor((project.semanticTimeline?.totalDurationMs ?? 0) / 1000)}s edited / {Math.floor((project.sourceVideo?.durationMs ?? project.semanticTimeline?.originalDurationMs ?? 0) / 1000)}s original</span>
                 </div>
-                <div className="flex-1 overflow-hidden">{bottomTab === 'timeline' ? <SemanticTimelinePanel /> : <LogsPanel />}</div>
+                
+                <div className="flex-1 overflow-hidden">
+                  {bottomTab === 'timeline' && <SemanticTimelinePanel />}
+                  {bottomTab === 'logs' && <LogsPanel />}
+                  {bottomTab === 'autocut' && (
+                    <div className="h-full flex items-center justify-center text-xs text-[#555] font-mono">
+                      Os controles de silêncio estão no painel à direita! 👉
+                    </div>
+                  )}
+                </div>
               </Panel>
             </PanelGroup>
           </Panel>
@@ -150,14 +190,21 @@ export default function ProjectEditorPage() {
             
             <div className="flex-1 overflow-hidden">
               {rightTab === 'info'     && <VideoInfoPanel video={project.sourceVideo} />}
-              {rightTab === 'audio'    && <AutoCutPanel />}
               {rightTab === 'presets'  && <PresetsPanel appliedPreset={project.appliedPreset} />}
               {rightTab === 'captions' && <CaptionPanel />}
               {rightTab === 'jobs'     && <JobsPanelEnhanced legacyJobs={project.jobs} />}
             </div>
 
-            <div className="h-[260px] border-t border-[#1c1c20] bg-[#070708] flex-shrink-0 flex flex-col">
-               <DigitalMixer audioLevel={level} />
+            {/* A MÁGICA DE LAYOUT AQUI: Painel extra que só aparece quando clica em Remover Silêncios */}
+            <div className="flex-shrink-0 flex flex-col border-t border-[#1c1c20] bg-[#070708]">
+               {bottomTab === 'autocut' && (
+                 <div className="border-b border-[#1c1c20] bg-[#0a0a0c]">
+                   <AutoCutPanel />
+                 </div>
+               )}
+               <div className="h-[260px] flex flex-col">
+                 <DigitalMixer audioLevel={level} />
+               </div>
             </div>
 
           </Panel>
@@ -204,44 +251,31 @@ function AutoCutPanel() {
   const minDuration = useProjectStore((s) => s.silenceMinDuration);
   const setMinDuration = useProjectStore((s) => s.setSilenceMinDuration);
   const applyAutoCut = useProjectStore((s) => s.applyAutoCut);
-  const restoreTimeline = useProjectStore((s) => s.restoreTimeline);
   const isRebuilding = useProjectStore((s) => s.isRebuilding);
 
   return (
-    <div className="h-full flex flex-col overflow-y-auto p-4 space-y-6">
+    <div className="p-4 space-y-4">
       <div>
-        <p className="text-[11px] font-semibold text-[#eee] flex items-center gap-2 mb-2"><AudioWaveform className="w-4 h-4 text-primary" /> Noise Gate (Auto-Cut)</p>
-        <p className="text-[10px] text-muted-foreground mb-4 leading-relaxed">Detecta silêncios reais no áudio e remove automaticamente. Funciona em cima dos cortes existentes.</p>
+        <p className="text-[11px] font-semibold text-emerald-400 flex items-center gap-2 mb-2"><Scissors className="w-4 h-4" /> Remover Silêncios</p>
+        <p className="text-[9px] text-muted-foreground mb-4">Ajuste a pressão para fatiar apenas pausas indesejadas.</p>
         
-        <div className="space-y-2 mb-4">
-          <div className="flex justify-between"><span className="text-[10px] text-[#888]">Limiar de ruído</span><span className="text-[10px] font-mono text-primary">{noiseDb} dB</span></div>
-          <input type="range" min="-40" max="-10" step="1" value={noiseDb} onChange={(e) => setNoiseDb(Number(e.target.value))} className="w-full accent-primary" />
-          <div className="flex justify-between text-[9px] text-[#555]">
-            <span>Sensível (-40dB)</span>
-            <span>Agressivo (-10dB)</span>
-          </div>
+        <div className="space-y-2 mb-3">
+          <div className="flex justify-between"><span className="text-[9px] text-[#888]">Pressão (dB)</span><span className="text-[9px] font-mono text-emerald-400">{noiseDb} dB</span></div>
+          <input type="range" min="-40" max="-10" step="1" value={noiseDb} onChange={(e) => setNoiseDb(Number(e.target.value))} className="w-full accent-emerald-500" />
         </div>
 
         <div className="space-y-2">
-          <div className="flex justify-between"><span className="text-[10px] text-[#888]">Duração mínima</span><span className="text-[10px] font-mono text-primary">{minDuration.toFixed(1)}s</span></div>
-          <input type="range" min="0.1" max="2.0" step="0.1" value={minDuration} onChange={(e) => setMinDuration(Number(e.target.value))} className="w-full accent-primary" />
-          <div className="flex justify-between text-[9px] text-[#555]">
-            <span>Curto (0.1s)</span>
-            <span>Longo (2.0s)</span>
-          </div>
+          <div className="flex justify-between"><span className="text-[9px] text-[#888]">Duração mínima</span><span className="text-[9px] font-mono text-emerald-400">{minDuration.toFixed(1)}s</span></div>
+          <input type="range" min="0.1" max="2.0" step="0.1" value={minDuration} onChange={(e) => setMinDuration(Number(e.target.value))} className="w-full accent-emerald-500" />
         </div>
 
         <button 
           onClick={applyAutoCut} 
           disabled={isRebuilding}
-          className="w-full mt-4 py-2 text-[11px] font-semibold tracking-wider uppercase bg-[#1a1a24] border border-[#2a2a35] text-[#eee] hover:bg-primary/20 hover:border-primary hover:text-primary rounded transition-all disabled:opacity-50 disabled:pointer-events-none"
+          className="w-full mt-4 py-1.5 text-[10px] font-semibold tracking-wider uppercase bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/20 hover:border-emerald-500 rounded transition-all disabled:opacity-50 disabled:pointer-events-none"
         >
-          {isRebuilding ? 'Detectando silêncios...' : 'Aplicar Auto-Cut'}
+          {isRebuilding ? 'Analisando...' : 'Aplicar Corte'}
         </button>
-      </div>
-
-      <div className="pt-6 border-t border-[#1c1c20]">
-        <button onClick={restoreTimeline} className="w-full py-2 text-[11px] font-semibold tracking-wider uppercase bg-destructive/10 border border-destructive/20 text-destructive hover:bg-destructive hover:text-white rounded transition-all">Restaurar Original</button>
       </div>
     </div>
   );
@@ -259,7 +293,7 @@ function DigitalMixer({ audioLevel }: { audioLevel: number }) {
 
   return (
     <div className="flex-1 flex flex-col p-4">
-      <p className="text-[11px] font-semibold text-[#eee] flex items-center gap-2 mb-4"><Volume2 className="w-4 h-4 text-emerald-400" /> Digital Mixer</p>
+      <p className="text-[11px] font-semibold text-[#eee] flex items-center gap-2 mb-4"><Volume2 className="w-4 h-4 text-[#4f6ef7]" /> Digital Mixer</p>
       <div className="flex justify-around gap-4 flex-1 px-2">
         <MixerFader 
           label="Clipe Atual" value={selectedVol} 
