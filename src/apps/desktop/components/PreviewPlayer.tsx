@@ -1,4 +1,4 @@
-import { Play, Pause, Square, SkipBack, SkipForward, Maximize2, Volume2, VolumeX, Scissors } from 'lucide-react';
+import { Play, Pause, Square, SkipBack, SkipForward, Maximize2, Volume2, VolumeX } from 'lucide-react';
 import type { SourceVideo } from '@/packages/shared-types';
 import { formatDuration } from '@/apps/desktop/services/mappers';
 import { useState, useRef, useCallback, useEffect } from 'react';
@@ -6,9 +6,7 @@ import { useProjectStore } from '../store/project-store';
 
 const IS_TAURI = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
-interface Props {
-  sourceVideo: SourceVideo | null;
-}
+interface Props { sourceVideo: SourceVideo | null; }
 
 export default function PreviewPlayer({ sourceVideo }: Props) {
   const [progress, setProgress] = useState(0);
@@ -19,7 +17,6 @@ export default function PreviewPlayer({ sourceVideo }: Props) {
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const scrubRef = useRef<HTMLDivElement>(null);
-  
   const audioCtxRef = useRef<AudioContext | null>(null);
   const gainNodeRef = useRef<GainNode | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -28,22 +25,22 @@ export default function PreviewPlayer({ sourceVideo }: Props) {
   const project = useProjectStore(s => s.project);
   const isRebuilding = useProjectStore(s => s.isRebuilding);
   const rebuildProgress = useProjectStore(s => s.rebuildProgress);
-  
   const isPlaying = useProjectStore(s => s.isPlaying);
   const setIsPlaying = useProjectStore(s => s.setIsPlaying);
   const setCurrentPlaybackMs = useProjectStore(s => s.setCurrentPlaybackMs);
   const seekRequestMs = useProjectStore(s => s.seekRequestMs);
   const requestSeek = useProjectStore(s => s.requestSeek);
 
-  const totalMs = sourceVideo?.durationMs ?? 0;
+  const cuts = project?.semanticTimeline?.cuts || [];
+  const totalMs = sourceVideo?.durationMs || 1;
 
   useEffect(() => {
     if (!sourceVideo?.proxyPath) { setVideoSrc(null); return; }
-    if (IS_TAURI) {
-      import('@tauri-apps/api/core').then(({ convertFileSrc }) => setVideoSrc(convertFileSrc(sourceVideo.proxyPath!)));
-    } else { setVideoSrc(sourceVideo.proxyPath); }
+    if (IS_TAURI) { import('@tauri-apps/api/core').then(({ convertFileSrc }) => setVideoSrc(convertFileSrc(sourceVideo.proxyPath!))); } 
+    else { setVideoSrc(sourceVideo.proxyPath); }
   }, [sourceVideo?.proxyPath]);
 
+  // Cria a Placa de Som (Web Audio API)
   useEffect(() => {
     if (!videoRef.current || !videoSrc) return;
     try {
@@ -52,59 +49,66 @@ export default function PreviewPlayer({ sourceVideo }: Props) {
         const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
         const ctx = new AudioContext();
         audioCtxRef.current = ctx;
-
         const source = ctx.createMediaElementSource(vid);
         const gainNode = ctx.createGain();
         const analyser = ctx.createAnalyser();
-        
         analyser.fftSize = 256;
-        
-        source.connect(gainNode);
-        gainNode.connect(analyser);
-        analyser.connect(ctx.destination);
-        
-        gainNodeRef.current = gainNode;
-        analyserRef.current = analyser;
-        dataArrayRef.current = new Uint8Array(analyser.frequencyBinCount);
+        source.connect(gainNode); gainNode.connect(analyser); analyser.connect(ctx.destination);
+        gainNodeRef.current = gainNode; analyserRef.current = analyser; dataArrayRef.current = new Uint8Array(analyser.frequencyBinCount);
         vid._audioConnected = true;
       }
     } catch (e) { console.warn("AudioContext bloqueado ou falhou", e); }
   }, [videoSrc]);
 
+  // Ouve os pulos da Agulha
   useEffect(() => {
     if (seekRequestMs !== null && videoRef.current) {
       videoRef.current.currentTime = seekRequestMs / 1000;
-      setCurrentMs(seekRequestMs);
       setCurrentPlaybackMs(seekRequestMs);
-      if (totalMs > 0) setProgress(seekRequestMs / totalMs);
+      setCurrentMs(seekRequestMs);
+      setProgress(seekRequestMs / totalMs);
       useProjectStore.setState({ seekRequestMs: null });
     }
   }, [seekRequestMs, setCurrentPlaybackMs, totalMs]);
 
+  // Sincroniza Play/Pause com o Cérebro (Shift+Space)
+  useEffect(() => {
+    if (!videoRef.current) return;
+    if (isPlaying && videoRef.current.paused) {
+      if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+        audioCtxRef.current.resume();
+      }
+      videoRef.current.play().catch(console.warn);
+    } else if (!isPlaying && !videoRef.current.paused) {
+      videoRef.current.pause();
+    }
+  }, [isPlaying]);
+
+  // Atalho Local (Barra de Espaço solta)
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
       const activeTag = document.activeElement?.tagName;
       if (activeTag === 'INPUT' || activeTag === 'TEXTAREA') return;
-      if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
+      if (e.code === 'Space' && !e.shiftKey) { 
+        e.preventDefault(); 
+        setIsPlaying(!useProjectStore.getState().isPlaying); 
+      }
     };
     window.addEventListener('keydown', handleGlobalKeyDown);
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
-  }, [isPlaying]);
+  }, []);
 
+  // Update Loop (60fps)
   useEffect(() => {
     let animationFrameId: number;
-    
     const updateProgress = () => {
       if (videoRef.current) {
         let timeMs = videoRef.current.currentTime * 1000;
-        const cuts = project?.semanticTimeline?.cuts || [];
-        
         const masterVol = useProjectStore.getState().masterVolume;
         let activeCut = null;
 
         if (isPlaying && cuts.length > 0) {
           activeCut = cuts.find(c => timeMs >= c.startMs && timeMs < c.endMs);
-          
           if (!activeCut) {
             const nextCut = cuts.find(c => c.startMs > timeMs);
             if (nextCut) {
@@ -120,81 +124,54 @@ export default function PreviewPlayer({ sourceVideo }: Props) {
         }
         
         if (gainNodeRef.current && audioCtxRef.current) {
-          if (isMuted) {
-            gainNodeRef.current.gain.setTargetAtTime(0, audioCtxRef.current.currentTime, 0.05);
-          } else {
+          if (isMuted) gainNodeRef.current.gain.setTargetAtTime(0, audioCtxRef.current.currentTime, 0.05);
+          else {
             const cutVol = (activeCut as any)?.volume ?? 1.0;
-            const finalVol = cutVol * masterVol;
-            gainNodeRef.current.gain.setTargetAtTime(finalVol, audioCtxRef.current.currentTime, 0.05);
+            gainNodeRef.current.gain.setTargetAtTime(cutVol * masterVol, audioCtxRef.current.currentTime, 0.05);
           }
         }
 
         if (analyserRef.current && dataArrayRef.current && isPlaying && !isMuted) {
           analyserRef.current.getByteFrequencyData(dataArrayRef.current);
-          let sum = 0;
-          for (let i = 0; i < dataArrayRef.current.length; i++) sum += dataArrayRef.current[i];
-          const avg = sum / dataArrayRef.current.length;
-          const normalizedLevel = avg / 255.0; 
-          window.dispatchEvent(new CustomEvent('v-audio-level', { detail: normalizedLevel }));
-        } else {
-          window.dispatchEvent(new CustomEvent('v-audio-level', { detail: 0 }));
-        }
+          let sum = 0; for (let i = 0; i < dataArrayRef.current.length; i++) sum += dataArrayRef.current[i];
+          window.dispatchEvent(new CustomEvent('v-audio-level', { detail: (sum / dataArrayRef.current.length) / 255.0 }));
+        } else { window.dispatchEvent(new CustomEvent('v-audio-level', { detail: 0 })); }
 
-        setCurrentMs(timeMs);
         setCurrentPlaybackMs(timeMs);
+        setCurrentMs(timeMs);
         if (totalMs > 0) setProgress(timeMs / totalMs);
       }
-      
       if (isPlaying) { animationFrameId = requestAnimationFrame(updateProgress); }
     };
-
     if (isPlaying) { animationFrameId = requestAnimationFrame(updateProgress); } 
     else { updateProgress(); window.dispatchEvent(new CustomEvent('v-audio-level', { detail: 0 })); }
-
     return () => cancelAnimationFrame(animationFrameId);
-  }, [isPlaying, totalMs, setCurrentPlaybackMs, project?.semanticTimeline?.cuts, isMuted, setIsPlaying]);
+  }, [isPlaying, totalMs, setCurrentPlaybackMs, cuts, isMuted, setIsPlaying]);
 
   const handleScrubClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (!scrubRef.current || !videoRef.current || totalMs === 0) return;
     const rect = scrubRef.current.getBoundingClientRect();
     const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    videoRef.current.currentTime = (pct * totalMs) / 1000;
+    const clickedMs = pct * totalMs;
+    
+    videoRef.current.currentTime = clickedMs / 1000;
     setProgress(pct);
-    setCurrentMs(pct * totalMs);
-    setCurrentPlaybackMs(pct * totalMs);
+    setCurrentMs(clickedMs);
+    setCurrentPlaybackMs(clickedMs);
   }, [totalMs, setCurrentPlaybackMs]);
 
   const togglePlay = () => {
-    if (!videoRef.current) return;
-    if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
-      audioCtxRef.current.resume();
-    }
-    if (isPlaying) videoRef.current.pause();
-    else videoRef.current.play();
     setIsPlaying(!isPlaying);
   };
 
   const stopPlayback = () => {
     if (!videoRef.current) return;
-    videoRef.current.pause();
-    videoRef.current.currentTime = 0;
-    setIsPlaying(false);
-    setProgress(0);
-    setCurrentMs(0);
-    setCurrentPlaybackMs(0);
-  };
-
-  const changeSpeed = (speed: number) => {
-    if (!videoRef.current) return;
-    videoRef.current.playbackRate = speed;
-    setPlaybackRate(speed);
+    videoRef.current.pause(); videoRef.current.currentTime = 0;
+    setIsPlaying(false); setProgress(0); setCurrentMs(0); setCurrentPlaybackMs(0);
   };
 
   const formatMs = (ms: number) => {
-    const s = Math.floor(ms / 1000);
-    const m = Math.floor(s / 60);
-    const sec = s % 60;
-    const frame = Math.floor((ms % 1000) / (1000 / 30));
+    const s = Math.floor(ms / 1000); const m = Math.floor(s / 60); const sec = s % 60; const frame = Math.floor((ms % 1000) / (1000 / 30));
     return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}:${String(frame).padStart(2, '0')}`;
   };
 
@@ -205,22 +182,16 @@ export default function PreviewPlayer({ sourceVideo }: Props) {
           {isRebuilding && (
             <div className="absolute inset-0 z-50 bg-black/80 flex flex-col items-center justify-center backdrop-blur-sm">
               <span className="text-white mb-3 font-mono tracking-widest text-sm">APLICANDO CORTES... {rebuildProgress}%</span>
-              <div className="w-64 h-2 bg-gray-800 rounded-full overflow-hidden">
-                <div className="h-full bg-primary transition-all duration-75" style={{ width: `${rebuildProgress}%` }} />
-              </div>
+              <div className="w-64 h-2 bg-gray-800 rounded-full overflow-hidden"><div className="h-full bg-primary transition-all duration-75" style={{ width: `${rebuildProgress}%` }} /></div>
             </div>
           )}
           {videoSrc ? (
-            <video ref={videoRef} src={videoSrc} className="absolute inset-0 w-full h-full object-contain" crossOrigin="anonymous" onPlay={() => setIsPlaying(true)} onPause={() => setIsPlaying(false)} onEnded={() => { setIsPlaying(false); stopPlayback(); }} />
+            <video ref={videoRef} src={videoSrc} className="absolute inset-0 w-full h-full object-contain" crossOrigin="anonymous" onEnded={() => { setIsPlaying(false); stopPlayback(); }} />
           ) : (
-            <>
-              <div className="absolute inset-0 bg-gradient-to-br from-[#0d0d14] via-[#080810] to-[#0a0a0d]" />
-              <div className="absolute inset-0 opacity-[0.03]" style={{ backgroundImage: 'repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(255,255,255,0.5) 2px, rgba(255,255,255,0.5) 3px)' }} />
-              <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
-                <div className="w-10 h-10 rounded-full border border-[#1e1e28] flex items-center justify-center"><Play className="w-4 h-4 text-[#2a2a35] ml-0.5" /></div>
-                <p className="text-[10px] font-mono text-[#222228] tracking-widest">NENHUM VÍDEO CARREGADO</p>
-              </div>
-            </>
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
+              <div className="w-10 h-10 rounded-full border border-[#1e1e28] flex items-center justify-center"><Play className="w-4 h-4 text-[#2a2a35] ml-0.5" /></div>
+              <p className="text-[10px] font-mono text-[#222228] tracking-widest">NENHUM VÍDEO CARREGADO</p>
+            </div>
           )}
           <div className="absolute top-2 left-3"><span className="font-mono text-[11px] text-[#4f6ef7]/60 tracking-widest bg-black/40 px-1.5 py-0.5 rounded-sm">{formatMs(currentMs)}</span></div>
         </div>
@@ -241,7 +212,7 @@ export default function PreviewPlayer({ sourceVideo }: Props) {
           <div className="ml-2 flex items-center gap-1">
             <span className="font-mono text-[11px] text-[#aaa] tracking-wider">{formatMs(currentMs)}</span>
             <span className="font-mono text-[11px] text-[#333]">/</span>
-            <span className="font-mono text-[11px] text-[#333] tracking-wider">{sourceVideo ? formatDuration(sourceVideo.durationMs) : '00:00'}</span>
+            <span className="font-mono text-[11px] text-[#333] tracking-wider">{formatDuration(totalMs)}</span>
           </div>
           <div className="flex-1" />
           <button className={`w-7 h-7 flex items-center justify-center transition-colors ${isMuted ? 'text-destructive/80 hover:text-destructive' : 'text-[#333] hover:text-[#888]'}`} title="Mute" onClick={() => setIsMuted(!isMuted)}>

@@ -24,8 +24,9 @@ const NAV_ITEMS = [
 
 const RIGHT_TABS = [
   { id: 'info',     label: 'Info' },
+  { id: 'autocut',  label: 'Auto-Cut' },
   { id: 'presets',  label: 'Presets' },
-  { id: 'captions', label: 'Legendas' }, // Renomeado!
+  { id: 'captions', label: 'Legendas' },
   { id: 'jobs',     label: 'Jobs' },
 ];
 
@@ -35,8 +36,8 @@ export default function ProjectEditorPage() {
   const navigate = useNavigate();
   
   const [rightTab, setRightTab] = useState('info');
-  // Adicionado o estado 'autocut' nas abas inferiores
-  const [bottomTab, setBottomTab] = useState<'timeline' | 'logs' | 'autocut'>('timeline');
+  // O bottomTab agora é estritamente para as visualizações inferiores
+  const [bottomTab, setBottomTab] = useState<'timeline' | 'logs'>('timeline');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [activeNav, setActiveNav] = useState('projects');
 
@@ -62,7 +63,6 @@ export default function ProjectEditorPage() {
       const activeTag = document.activeElement?.tagName;
       if (activeTag === 'INPUT' || activeTag === 'TEXTAREA') return;
       
-      // Atalho: Undo / Redo
       if (e.metaKey || e.ctrlKey) {
         if (e.key.toLowerCase() === 'z') {
           e.preventDefault();
@@ -71,18 +71,18 @@ export default function ProjectEditorPage() {
         }
       }
       
-      // Atalho CapCut/LogicPro: Shift + Space (Play a partir do corte selecionado)
       if (e.code === 'Space') {
-        e.preventDefault();
         const state = useProjectStore.getState();
         const selectedId = state.selectedCutId;
-        const isPlaying = state.isPlaying;
         
         if (e.shiftKey && selectedId) {
+          e.preventDefault();
           const cut = state.project?.semanticTimeline?.cuts.find(c => c.id === selectedId);
           if (cut) {
+             // Manda a agulha pro começo do clipe
              requestSeek(cut.startMs);
-             if (!isPlaying) setIsPlaying(true);
+             // Manda o sinal de Play
+             setIsPlaying(true);
              return;
           }
         }
@@ -149,17 +149,24 @@ export default function ProjectEditorPage() {
 
               <Panel defaultSize={30} minSize={15} className="flex flex-col bg-[#090909]">
                 <div className="h-7 flex items-center border-b border-[#1c1c20] px-3 gap-0 flex-shrink-0 bg-[#090909]">
+                  {/* ORDEM CORRIGIDA: TIMELINE -> REMOVER SILÊNCIOS -> LOGS */}
                   <button onClick={() => setBottomTab('timeline')} className={`px-3 h-full text-[10px] tracking-widest uppercase transition-colors ${bottomTab === 'timeline' ? 'text-[#ccc] border-b border-[#4f6ef7]' : 'text-[#333] hover:text-[#666]'}`}>
                     TIMELINE
-                  </button>
-                  <button onClick={() => setBottomTab('logs')} className={`px-3 h-full text-[10px] tracking-widest uppercase transition-colors ${bottomTab === 'logs' ? 'text-[#ccc] border-b border-[#4f6ef7]' : 'text-[#333] hover:text-[#666]'}`}>
-                    LOGS
                   </button>
                   
                   <div className="w-px h-3 bg-[#1c1c20] mx-1" />
                   
-                  <button onClick={() => setBottomTab('autocut')} className={`px-3 h-full text-[10px] tracking-widest uppercase transition-colors ${bottomTab === 'autocut' ? 'text-[#10b981] border-b border-[#10b981]' : 'text-[#333] hover:text-[#666]'}`}>
+                  <button 
+                    onClick={() => setRightTab(rightTab === 'autocut' ? 'info' : 'autocut')} 
+                    className={`px-3 h-full text-[10px] tracking-widest uppercase transition-colors ${rightTab === 'autocut' ? 'text-[#10b981] border-b border-[#10b981]' : 'text-[#333] hover:text-[#666]'}`}
+                  >
                     REMOVER SILÊNCIOS
+                  </button>
+
+                  <div className="w-px h-3 bg-[#1c1c20] mx-1" />
+
+                  <button onClick={() => setBottomTab('logs')} className={`px-3 h-full text-[10px] tracking-widest uppercase transition-colors ${bottomTab === 'logs' ? 'text-[#ccc] border-b border-[#4f6ef7]' : 'text-[#333] hover:text-[#666]'}`}>
+                    LOGS
                   </button>
 
                   <div className="flex-1" />
@@ -167,13 +174,9 @@ export default function ProjectEditorPage() {
                 </div>
                 
                 <div className="flex-1 overflow-hidden">
+                  {/* A timeline NUNCA some ao clicar em Remover Silêncios! */}
                   {bottomTab === 'timeline' && <SemanticTimelinePanel />}
                   {bottomTab === 'logs' && <LogsPanel />}
-                  {bottomTab === 'autocut' && (
-                    <div className="h-full flex items-center justify-center text-xs text-[#555] font-mono">
-                      Os controles de silêncio estão no painel à direita! 👉
-                    </div>
-                  )}
                 </div>
               </Panel>
             </PanelGroup>
@@ -190,21 +193,14 @@ export default function ProjectEditorPage() {
             
             <div className="flex-1 overflow-hidden">
               {rightTab === 'info'     && <VideoInfoPanel video={project.sourceVideo} />}
+              {rightTab === 'autocut'  && <AutoCutPanel />}
               {rightTab === 'presets'  && <PresetsPanel appliedPreset={project.appliedPreset} />}
               {rightTab === 'captions' && <CaptionPanel />}
               {rightTab === 'jobs'     && <JobsPanelEnhanced legacyJobs={project.jobs} />}
             </div>
 
-            {/* A MÁGICA DE LAYOUT AQUI: Painel extra que só aparece quando clica em Remover Silêncios */}
-            <div className="flex-shrink-0 flex flex-col border-t border-[#1c1c20] bg-[#070708]">
-               {bottomTab === 'autocut' && (
-                 <div className="border-b border-[#1c1c20] bg-[#0a0a0c]">
-                   <AutoCutPanel />
-                 </div>
-               )}
-               <div className="h-[260px] flex flex-col">
-                 <DigitalMixer audioLevel={level} />
-               </div>
+            <div className="h-[260px] flex-shrink-0 flex flex-col border-t border-[#1c1c20] bg-[#070708]">
+               <DigitalMixer audioLevel={level} />
             </div>
 
           </Panel>
@@ -254,29 +250,29 @@ function AutoCutPanel() {
   const isRebuilding = useProjectStore((s) => s.isRebuilding);
 
   return (
-    <div className="p-4 space-y-4">
+    <div className="p-4 space-y-4 h-full flex flex-col justify-between">
       <div>
-        <p className="text-[11px] font-semibold text-emerald-400 flex items-center gap-2 mb-2"><Scissors className="w-4 h-4" /> Remover Silêncios</p>
-        <p className="text-[9px] text-muted-foreground mb-4">Ajuste a pressão para fatiar apenas pausas indesejadas.</p>
+        <p className="text-[11px] font-semibold text-[#10b981] flex items-center gap-2 mb-2"><Scissors className="w-4 h-4" /> Remover Silêncios</p>
+        <p className="text-[9px] text-muted-foreground mb-4 leading-relaxed">Ajuste a pressão do noise gate para fatiar pausas indesejadas.</p>
         
-        <div className="space-y-2 mb-3">
-          <div className="flex justify-between"><span className="text-[9px] text-[#888]">Pressão (dB)</span><span className="text-[9px] font-mono text-emerald-400">{noiseDb} dB</span></div>
-          <input type="range" min="-40" max="-10" step="1" value={noiseDb} onChange={(e) => setNoiseDb(Number(e.target.value))} className="w-full accent-emerald-500" />
+        <div className="space-y-2 mb-4">
+          <div className="flex justify-between"><span className="text-[9px] text-[#888]">Pressão (dB)</span><span className="text-[9px] font-mono text-[#10b981]">{noiseDb} dB</span></div>
+          <input type="range" min="-40" max="-10" step="1" value={noiseDb} onChange={(e) => setNoiseDb(Number(e.target.value))} className="w-full accent-[#10b981]" />
         </div>
 
         <div className="space-y-2">
-          <div className="flex justify-between"><span className="text-[9px] text-[#888]">Duração mínima</span><span className="text-[9px] font-mono text-emerald-400">{minDuration.toFixed(1)}s</span></div>
-          <input type="range" min="0.1" max="2.0" step="0.1" value={minDuration} onChange={(e) => setMinDuration(Number(e.target.value))} className="w-full accent-emerald-500" />
+          <div className="flex justify-between"><span className="text-[9px] text-[#888]">Duração mínima</span><span className="text-[9px] font-mono text-[#10b981]">{minDuration.toFixed(1)}s</span></div>
+          <input type="range" min="0.1" max="2.0" step="0.1" value={minDuration} onChange={(e) => setMinDuration(Number(e.target.value))} className="w-full accent-[#10b981]" />
         </div>
-
-        <button 
-          onClick={applyAutoCut} 
-          disabled={isRebuilding}
-          className="w-full mt-4 py-1.5 text-[10px] font-semibold tracking-wider uppercase bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/20 hover:border-emerald-500 rounded transition-all disabled:opacity-50 disabled:pointer-events-none"
-        >
-          {isRebuilding ? 'Analisando...' : 'Aplicar Corte'}
-        </button>
       </div>
+
+      <button 
+        onClick={applyAutoCut} 
+        disabled={isRebuilding}
+        className="w-full py-1.5 text-[10px] font-semibold tracking-wider uppercase bg-[#10b981]/10 border border-[#10b981]/20 text-[#10b981] hover:bg-[#10b981]/20 hover:border-[#10b981] rounded transition-all disabled:opacity-50 disabled:pointer-events-none"
+      >
+        {isRebuilding ? 'Analisando...' : 'Aplicar Corte'}
+      </button>
     </div>
   );
 }
