@@ -125,7 +125,7 @@ interface ProjectStore {
 
 export const useProjectStore = create<ProjectStore>((set, get) => ({
   project: null, isLoading: false, importError: null, importProgress: null,
-  isRebuilding: false, rebuildProgress: 0, 
+  isRebuilding: false, rebuildProgress: 0, savedSilences: [] as any[], 
   
   isPlaying: false,
   setIsPlaying: (playing: boolean) => set({ isPlaying: playing }),
@@ -236,7 +236,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       id: `cut-restore-${Date.now()}`, startMs: 0, endMs: originalMs,
       type: "keep", sourceSegmentId: "restored", label: "Vídeo Original Restaurado",
     }];
-    set({ project: { ...newProject, semanticTimeline: { ...newProject.semanticTimeline, cuts, totalDurationMs: originalMs } } });
+    set({ project: { ...newProject, semanticTimeline: { ...newProject.semanticTimeline, cuts, totalDurationMs: originalMs } }, savedSilences: [] } as any);
     get().markDirty();
   },
 
@@ -338,7 +338,6 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     if (found) {
       set({ project: newProject as any });
       get().markDirty();
-      // Auto-rebuild timeline com debounce
       clearTimeout((window as any).__rebuildDebounce);
       (window as any).__rebuildDebounce = setTimeout(() => {
         get().rebuildTimeline();
@@ -383,8 +382,25 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     } else {
       cuts.push({ id: "cut-rb-full", startMs: 0, endMs: videoDurationMs, type: "keep", sourceSegmentId: "full", label: "Video Completo" } as TimelineCut);
     }
-    const totalMs = cuts.reduce((a: number, c: any) => a + (c.endMs - c.startMs), 0);
-    set({ project: { ...project, semanticTimeline: { ...project.semanticTimeline, cuts, totalDurationMs: totalMs, originalDurationMs } } });
+    const savedSil = (get() as any).savedSilences || [];
+    let finalCuts: TimelineCut[] = [];
+    if (savedSil.length > 0) {
+      let finalIdx = 0;
+      for (const cut of cuts) {
+        const overlaps = savedSil.filter((s: any) => s.start_ms < cut.endMs && s.end_ms > cut.startMs);
+        if (overlaps.length === 0) { finalCuts.push(cut); continue; }
+        let cursor = cut.startMs;
+        for (const s of overlaps) {
+          const sStart = Math.max(s.start_ms, cut.startMs);
+          const sEnd = Math.min(s.end_ms, cut.endMs);
+          if (cursor < sStart) finalCuts.push({ ...cut, id: `cut-rb-s-${finalIdx++}`, startMs: cursor, endMs: sStart } as TimelineCut);
+          cursor = sEnd;
+        }
+        if (cursor < cut.endMs) finalCuts.push({ ...cut, id: `cut-rb-s-${finalIdx++}`, startMs: cursor, endMs: cut.endMs } as TimelineCut);
+      }
+    } else { finalCuts = cuts; }
+    const totalMs = finalCuts.reduce((a: number, c: any) => a + (c.endMs - c.startMs), 0);
+    set({ project: { ...project, semanticTimeline: { ...project.semanticTimeline, cuts: finalCuts, totalDurationMs: totalMs, originalDurationMs } } });
     get().markDirty();
   },
 
@@ -437,6 +453,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     const noiseDb = get().silenceNoiseDb;
     const minDuration = get().silenceMinDuration;
     const result = await detectSilences(filePath, noiseDb, minDuration);
+    if (result && result.silences.length > 0) set({ savedSilences: result.silences } as any);
 
     if (!result || result.silences.length === 0) {
       // Se nao tem silencios, a base de palavras é o resultado final
@@ -533,6 +550,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     if (removedCount > 0) {
       set({ project: newProject as any });
       get().markDirty();
+      get().rebuildTimeline();
     }
   },
 

@@ -102,7 +102,7 @@ export default function RemoverViciosPanel() {
           </div>
         </div>
         <div className="space-y-2 pt-3 border-t border-[#1c1c20]">
-          <h3 className="text-[10px] text-[#aaa] font-bold uppercase tracking-wider">Palavras Riscadas no Projeto</h3>
+          <h3 className="text-[10px] text-[#aaa] font-bold uppercase tracking-wider">Palavras Removidas</h3>
           <div className="flex flex-wrap gap-1.5">
             {uniqueRemoved.map(([word, count]) => (
               <span key={word} className="px-2 py-1 bg-red-500/10 border border-red-500/20 text-red-400 text-[10px] rounded-full">
