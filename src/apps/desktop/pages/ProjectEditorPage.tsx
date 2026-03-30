@@ -278,12 +278,12 @@ function AutoCutPanel() {
         
         <div className="space-y-2 mb-4">
           <div className="flex justify-between"><span className="text-[9px] text-[#888]">Pressão (dB)</span><span className="text-[9px] font-mono text-[#10b981]">{noiseDb} dB</span></div>
-          <input type="range" min="-40" max="-10" step="1" value={noiseDb} onChange={(e) => setNoiseDb(Number(e.target.value))} className="w-full accent-[#10b981]" />
+          <input type="range" min="-60" max="-5" step="0.5" value={noiseDb} onChange={(e) => setNoiseDb(Number(e.target.value))} className="w-full accent-[#10b981]" />
         </div>
 
         <div className="space-y-2">
           <div className="flex justify-between"><span className="text-[9px] text-[#888]">Duração mínima</span><span className="text-[9px] font-mono text-[#10b981]">{minDuration.toFixed(1)}s</span></div>
-          <input type="range" min="0.1" max="2.0" step="0.1" value={minDuration} onChange={(e) => setMinDuration(Number(e.target.value))} className="w-full accent-[#10b981]" />
+          <input type="range" min="0.05" max="2.0" step="0.05" value={minDuration} onChange={(e) => setMinDuration(Number(e.target.value))} className="w-full accent-[#10b981]" />
         </div>
       </div>
 

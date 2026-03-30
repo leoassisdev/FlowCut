@@ -132,9 +132,28 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   requestSeek: (ms: number) => set({ seekRequestMs: ms }),
   
   silenceNoiseDb: -20,
-  setSilenceNoiseDb: (db: number) => set({ silenceNoiseDb: db }),
+  setSilenceNoiseDb: (db: number) => {
+    set({ silenceNoiseDb: db });
+    // Debounce: aplica auto-cut 500ms depois de parar de mexer
+    clearTimeout((window as any).__acDebounce);
+    (window as any).__acDebounce = setTimeout(() => {
+      const state = get();
+      if (state.project?.semanticTimeline && state.project?.sourceVideo) {
+        state.applyAutoCut();
+      }
+    }, 500);
+  },
   silenceMinDuration: 0.3,
-  setSilenceMinDuration: (d: number) => set({ silenceMinDuration: d }),
+  setSilenceMinDuration: (d: number) => {
+    set({ silenceMinDuration: d });
+    clearTimeout((window as any).__acDebounce);
+    (window as any).__acDebounce = setTimeout(() => {
+      const state = get();
+      if (state.project?.semanticTimeline && state.project?.sourceVideo) {
+        state.applyAutoCut();
+      }
+    }, 500);
+  },
   applyCrossfade: true,
   setApplyCrossfade: (apply: boolean) => { set({ applyCrossfade: apply }); get().markDirty(); },
 
@@ -397,71 +416,44 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     if (!project?.semanticTimeline || !project.sourceVideo) return;
     const filePath = project.sourceVideo.filePath;
     if (!filePath) return;
-
     set({ isRebuilding: true, rebuildProgress: 10 });
-    
+
     const noiseDb = get().silenceNoiseDb;
     const minDuration = get().silenceMinDuration;
     const videoDurationMs = project.sourceVideo.durationMs;
     const originalDurationMs = project.semanticTimeline.originalDurationMs || videoDurationMs;
-    const existingCuts = project.semanticTimeline.cuts;
+
+    // Restaura timeline pro video inteiro antes de reprocessar
+    const fullCut = { id: 'cut-pre-ac', startMs: 0, endMs: videoDurationMs, type: 'keep', sourceSegmentId: 'full', label: 'Full' } as TimelineCut;
+    set({ project: { ...get().project!, semanticTimeline: { ...get().project!.semanticTimeline!, cuts: [fullCut], totalDurationMs: videoDurationMs, originalDurationMs } } });
 
     const result = await detectSilences(filePath, noiseDb, minDuration);
 
     if (!result || result.silences.length === 0) {
+      const noSilenceCut = { id: 'cut-full', startMs: 0, endMs: videoDurationMs, type: 'keep', sourceSegmentId: 'full', label: 'Sem silencios' } as TimelineCut;
+      set({ project: { ...project, semanticTimeline: { ...project.semanticTimeline, cuts: [noSilenceCut], totalDurationMs: videoDurationMs, originalDurationMs } } });
       set({ isRebuilding: false, rebuildProgress: 100 });
       setTimeout(() => set({ rebuildProgress: 0 }), 300);
       return;
     }
-
     set({ rebuildProgress: 60 });
 
+    const silences = result.silences;
     const newCuts: TimelineCut[] = [];
     let cutIndex = 0;
     let totalKeptMs = 0;
+    let cursor = 0;
 
-    for (const cut of existingCuts) {
-      const overlappingSilences = result.silences.filter(
-        s => s.start_ms < cut.endMs && s.end_ms > cut.startMs
-      );
-
-      if (overlappingSilences.length === 0) {
-        newCuts.push({ ...cut, id: `cut-ac-${cutIndex++}` });
-        totalKeptMs += (cut.endMs - cut.startMs);
-        continue;
+    for (const silence of silences) {
+      if (silence.start_ms > cursor) {
+        newCuts.push({ id: `cut-ac-${cutIndex++}`, startMs: cursor, endMs: silence.start_ms, type: 'keep', sourceSegmentId: 'auto', label: `Fala ${cutIndex}` } as TimelineCut);
+        totalKeptMs += (silence.start_ms - cursor);
       }
-
-      let cursor = cut.startMs;
-
-      for (const silence of overlappingSilences) {
-        const silStart = Math.max(silence.start_ms, cut.startMs);
-        const silEnd = Math.min(silence.end_ms, cut.endMs);
-
-        if (cursor < silStart) {
-          newCuts.push({
-            id: `cut-ac-${cutIndex++}`,
-            startMs: cursor,
-            endMs: silStart,
-            type: 'keep',
-            sourceSegmentId: cut.sourceSegmentId,
-            label: cut.label,
-          } as TimelineCut);
-          totalKeptMs += (silStart - cursor);
-        }
-        cursor = silEnd;
-      }
-
-      if (cursor < cut.endMs) {
-        newCuts.push({
-          id: `cut-ac-${cutIndex++}`,
-          startMs: cursor,
-          endMs: cut.endMs,
-          type: 'keep',
-          sourceSegmentId: cut.sourceSegmentId,
-          label: cut.label,
-        } as TimelineCut);
-        totalKeptMs += (cut.endMs - cursor);
-      }
+      cursor = silence.end_ms;
+    }
+    if (cursor < videoDurationMs) {
+      newCuts.push({ id: `cut-ac-${cutIndex++}`, startMs: cursor, endMs: videoDurationMs, type: 'keep', sourceSegmentId: 'auto', label: `Fala ${cutIndex}` } as TimelineCut);
+      totalKeptMs += (videoDurationMs - cursor);
     }
 
     set({
@@ -470,7 +462,6 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         semanticTimeline: { ...project.semanticTimeline, cuts: newCuts, totalDurationMs: totalKeptMs, originalDurationMs },
       },
     });
-
     get().markDirty();
     set({ isRebuilding: false, rebuildProgress: 100 });
     setTimeout(() => set({ rebuildProgress: 0 }), 300);
