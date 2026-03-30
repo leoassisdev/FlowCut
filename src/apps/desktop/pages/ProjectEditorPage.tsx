@@ -226,6 +226,7 @@ export default function ProjectEditorPage() {
               {rightTab === 'presets'  && <PresetsPanel appliedPreset={project.appliedPreset} />}
               {rightTab === 'captions' && <CaptionPanel />}
               {rightTab === 'jobs'     && <JobsPanelEnhanced legacyJobs={project.jobs} />}
+              {rightTab === "fillers" && <RemoverViciosPanel />}
             </div>
 
             <div className="h-[260px] flex-shrink-0 flex flex-col border-t border-[#1c1c20] bg-[#070708]">

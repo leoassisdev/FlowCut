@@ -1,14 +1,23 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { ChevronDown, ChevronUp, Cpu } from 'lucide-react';
 import { useProjectStore } from '../store/project-store';
 
 export default function AIAssistant() {
   const [isOpen, setIsOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!isOpen) return;
+    const onClick = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) setIsOpen(false);
+    };
+    document.addEventListener("mousedown", onClick);
+    return () => document.removeEventListener("mousedown", onClick);
+  }, [isOpen]);
   const applyAutoCut = useProjectStore(s => s.applyAutoCut);
   const removeFillers = useProjectStore(s => s.removeFillers);
 
   return (
-    <div className="fixed bottom-6 left-16 z-50 flex flex-col items-start">
+    <div className="fixed bottom-6 left-16 z-50 flex flex-col items-start" ref={containerRef}>
       
       {isOpen && (
          <div className="mb-3 w-80 bg-[#111115] border border-[#222] rounded-lg shadow-2xl overflow-hidden flex flex-col font-mono">

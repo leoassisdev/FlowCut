@@ -227,12 +227,16 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
   restoreTimeline: () => {
     const project = get().project; if (!project?.sourceVideo) return;
-    const originalMs = project.sourceVideo.durationMs;
+    const newProject = JSON.parse(JSON.stringify(project));
+    if (newProject.transcript?.segments) {
+      newProject.transcript.segments.forEach((s: any) => s.words.forEach((w: any) => { w.isRemoved = false; }));
+    }
+    const originalMs = newProject.sourceVideo.durationMs;
     const cuts: TimelineCut[] = [{
       id: `cut-restore-${Date.now()}`, startMs: 0, endMs: originalMs,
-      type: 'keep', sourceSegmentId: 'restored', label: 'Vídeo Original Restaurado',
+      type: "keep", sourceSegmentId: "restored", label: "Vídeo Original Restaurado",
     }];
-    set({ project: { ...project, semanticTimeline: { ...project.semanticTimeline, cuts, totalDurationMs: originalMs } } });
+    set({ project: { ...newProject, semanticTimeline: { ...newProject.semanticTimeline, cuts, totalDurationMs: originalMs } } });
     get().markDirty();
   },
 
@@ -337,7 +341,19 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       // Auto-rebuild timeline com debounce
       clearTimeout((window as any).__rebuildDebounce);
       (window as any).__rebuildDebounce = setTimeout(() => {
-        get().rebuildTimeline();
+        // rebuild inline sem apagar silencios
+      const proj2 = get().project;
+      if (proj2?.semanticTimeline) {
+        const kept = proj2.transcript?.segments?.flatMap((s2: any) => s2.words).filter((w2: any) => !w2.isRemoved) || [];
+        if (kept.length > 0) {
+          kept.sort((a2: any, b2: any) => a2.startMs - b2.startMs);
+          const newCuts2: TimelineCut[] = []; let cs = kept[0].startMs, ce = kept[0].endMs, cl = kept[0].word, ci = 0;
+          for (let j = 1; j < kept.length; j++) { const kw = kept[j]; if (kw.startMs - ce > 300) { newCuts2.push({ id: `cut-fv-${ci++}`, startMs: cs, endMs: ce, type: "keep", sourceSegmentId: "auto", label: cl.slice(0,40) } as TimelineCut); cs = kw.startMs; ce = kw.endMs; cl = kw.word; } else { ce = kw.endMs; cl += " " + kw.word; } }
+          newCuts2.push({ id: `cut-fv-${ci}`, startMs: cs, endMs: ce, type: "keep", sourceSegmentId: "auto", label: cl.slice(0,40) } as TimelineCut);
+          const tm = newCuts2.reduce((ac: number, cx: any) => ac + (cx.endMs - cx.startMs), 0);
+          set({ project: { ...proj2, semanticTimeline: { ...proj2.semanticTimeline, cuts: newCuts2, totalDurationMs: tm } } });
+        }
+      }
       }, 400);
     }
   },
@@ -358,11 +374,30 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     const seg = project.transcript.segments.find((s) => s.id === segmentId);
     get().executeCommand(createRemoveSegmentCommand(segmentId, seg?.text ?? ''));
   },
-
   rebuildTimeline: async () => {
-    // Agora o rebuild simplesmente delega para o applyAutoCut 
-    // para garantir que Texto e Áudio andem sempre de mãos dadas!
-    await get().applyAutoCut();
+    const project = get().project;
+    if (!project?.semanticTimeline || !project.sourceVideo) return;
+    const videoDurationMs = project.sourceVideo.durationMs;
+    const originalDurationMs = project.semanticTimeline.originalDurationMs || videoDurationMs;
+    const allWords = project.transcript?.segments?.flatMap((s: any) => s.words).filter((w: any) => !w.isRemoved) || [];
+    let cuts: TimelineCut[] = [];
+    if (allWords.length > 0) {
+      allWords.sort((a: any, b: any) => a.startMs - b.startMs);
+      let cStart = allWords[0].startMs, cEnd = allWords[0].endMs, cLabel = allWords[0].word, idx = 0;
+      for (let i = 1; i < allWords.length; i++) {
+        const w = allWords[i];
+        if (w.startMs - cEnd > 300) {
+          cuts.push({ id: `cut-rb-${idx++}`, startMs: cStart, endMs: cEnd, type: "keep", sourceSegmentId: "auto", label: cLabel.slice(0,40) } as TimelineCut);
+          cStart = w.startMs; cEnd = w.endMs; cLabel = w.word;
+        } else { cEnd = w.endMs; cLabel += " " + w.word; }
+      }
+      cuts.push({ id: `cut-rb-${idx}`, startMs: cStart, endMs: cEnd, type: "keep", sourceSegmentId: "auto", label: cLabel.slice(0,40) } as TimelineCut);
+    } else {
+      cuts.push({ id: "cut-rb-full", startMs: 0, endMs: videoDurationMs, type: "keep", sourceSegmentId: "full", label: "Video Completo" } as TimelineCut);
+    }
+    const totalMs = cuts.reduce((a: number, c: any) => a + (c.endMs - c.startMs), 0);
+    set({ project: { ...project, semanticTimeline: { ...project.semanticTimeline, cuts, totalDurationMs: totalMs, originalDurationMs } } });
+    get().markDirty();
   },
 
   applyAutoCut: async () => {
@@ -510,7 +545,19 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     if (removedCount > 0) {
       set({ project: newProject as any });
       get().markDirty();
-      get().rebuildTimeline();
+      // rebuild inline sem apagar silencios
+      const proj2 = get().project;
+      if (proj2?.semanticTimeline) {
+        const kept = proj2.transcript?.segments?.flatMap((s2: any) => s2.words).filter((w2: any) => !w2.isRemoved) || [];
+        if (kept.length > 0) {
+          kept.sort((a2: any, b2: any) => a2.startMs - b2.startMs);
+          const newCuts2: TimelineCut[] = []; let cs = kept[0].startMs, ce = kept[0].endMs, cl = kept[0].word, ci = 0;
+          for (let j = 1; j < kept.length; j++) { const kw = kept[j]; if (kw.startMs - ce > 300) { newCuts2.push({ id: `cut-fv-${ci++}`, startMs: cs, endMs: ce, type: "keep", sourceSegmentId: "auto", label: cl.slice(0,40) } as TimelineCut); cs = kw.startMs; ce = kw.endMs; cl = kw.word; } else { ce = kw.endMs; cl += " " + kw.word; } }
+          newCuts2.push({ id: `cut-fv-${ci}`, startMs: cs, endMs: ce, type: "keep", sourceSegmentId: "auto", label: cl.slice(0,40) } as TimelineCut);
+          const tm = newCuts2.reduce((ac: number, cx: any) => ac + (cx.endMs - cx.startMs), 0);
+          set({ project: { ...proj2, semanticTimeline: { ...proj2.semanticTimeline, cuts: newCuts2, totalDurationMs: tm } } });
+        }
+      }
     }
   },
 
