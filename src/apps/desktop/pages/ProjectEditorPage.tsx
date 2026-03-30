@@ -32,7 +32,7 @@ const RIGHT_TABS = [
 
 export default function ProjectEditorPage() {
   const { projectId } = useParams<{ projectId: string }>();
-  const { project, isLoading, loadProject, undo, redo, setIsPlaying, requestSeek } = useProjectStore();
+  const { project, isLoading, loadProject, undo, redo, setIsPlaying, requestSeek, restoreTimeline } = useProjectStore();
   const navigate = useNavigate();
   
   const [rightTab, setRightTab] = useState('info');
@@ -42,6 +42,7 @@ export default function ProjectEditorPage() {
   const [activeNav, setActiveNav] = useState('projects');
 
   const [level, setLevel] = useState(0);
+  const [showRestoreModal, setShowRestoreModal] = useState(false);
 
   useKeyboardShortcuts();
 
@@ -117,6 +118,19 @@ export default function ProjectEditorPage() {
   }
 
   return (
+    <>
+      {showRestoreModal && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm">
+          <div className="bg-[#111115] border border-[#333] rounded-lg p-6 max-w-sm w-full shadow-2xl">
+            <h3 className="text-red-500 font-bold mb-2">Atenção!</h3>
+            <p className="text-sm text-[#ccc] mb-6">ISSO IRÁ APAGAR TODAS AS SUAS ALTERAÇÕES FEITAS ATÉ AQUI. Deseja continuar?</p>
+            <div className="flex justify-end gap-3">
+              <button onClick={() => setShowRestoreModal(false)} className="px-4 py-2 rounded text-xs font-semibold bg-[#222] hover:bg-[#333] text-white transition-colors">Cancelar</button>
+              <button onClick={() => { restoreTimeline(); setShowRestoreModal(false); }} className="px-4 py-2 rounded text-xs font-semibold bg-red-600 hover:bg-red-700 text-white transition-colors">Sim, Restaurar</button>
+            </div>
+          </div>
+        </div>
+      )}
     <div className="h-screen bg-[#0e0e0f] flex flex-col overflow-hidden font-['JetBrains_Mono',_'Fira_Code',_monospace]">
       <div className="h-9 border-b border-[#1c1c20] flex-shrink-0">
         <EditorToolbar project={project} onNavigateHome={() => navigate('/')} />
@@ -168,6 +182,10 @@ export default function ProjectEditorPage() {
                   <button onClick={() => setBottomTab('logs')} className={`px-3 h-full text-[10px] tracking-widest uppercase transition-colors ${bottomTab === 'logs' ? 'text-[#ccc] border-b border-[#4f6ef7]' : 'text-[#333] hover:text-[#666]'}`}>
                     LOGS
                   </button>
+                  <div className="w-px h-3 bg-[#1c1c20] mx-1" />
+                  <button onClick={() => setShowRestoreModal(true)} className="px-3 h-full text-[10px] tracking-widest uppercase transition-colors text-red-500 hover:bg-red-500/10">
+                    RESTAURAR PADRÃO
+                  </button>
 
                   <div className="flex-1" />
                   <span className="text-[10px] font-mono text-[#2a2a35]">{Math.floor((project.semanticTimeline?.totalDurationMs ?? 0) / 1000)}s edited / {Math.floor((project.sourceVideo?.durationMs ?? project.semanticTimeline?.originalDurationMs ?? 0) / 1000)}s original</span>
@@ -208,7 +226,7 @@ export default function ProjectEditorPage() {
       </div>
       <AIAssistant />
     </div>
-  );
+  </>);
 }
 
 // ── Mini-panels ───────────────────────────────────────────────────────────────

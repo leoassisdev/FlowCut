@@ -160,7 +160,7 @@ export default function TranscriptPanel() {
                   onDoubleClick={() => requestSeek(w.startMs)}
                   className={`
                     inline-block px-0.5 mx-[1px] rounded-sm cursor-pointer transition-all select-none
-                    ${w.isRemoved ? 'line-through text-[#555] opacity-50' : isEditMode ? 'hover:bg-[#4f6ef7]/20 hover:text-[#4f6ef7]' : 'hover:bg-[#1a1a24]'}
+                    ${w.isRemoved ? 'line-through text-red-500 opacity-70' : isEditMode ? 'hover:bg-[#4f6ef7]/20 hover:text-[#4f6ef7]' : 'hover:bg-[#1a1a24]'}
                     ${isPlaying && !w.isRemoved && !isActiveMatch ? 'bg-primary/20 text-[#4f6ef7] font-medium' : ''}
                     ${isMatch && !isActiveMatch ? 'border border-yellow-500/60 text-yellow-200 bg-yellow-500/10' : ''}
                     ${isActiveMatch ? 'bg-yellow-500/40 border border-yellow-400 text-yellow-400 font-bold scale-110 shadow-[0_0_10px_rgba(234,179,8,0.2)] z-10 relative' : 'border border-transparent'}
