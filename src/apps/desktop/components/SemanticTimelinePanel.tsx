@@ -250,7 +250,7 @@ export default function SemanticTimelinePanel() {
 
           </div>
 
-          <div className="absolute top-0 bottom-0 w-px bg-primary z-50 pointer-events-none transition-all duration-75 ease-linear" style={{ left: `${progressPct}%` }}>
+          <div className="absolute top-0 bottom-0 w-px bg-primary z-50 pointer-events-none " style={{ left: `${progressPct}%` }}>
             <div className="absolute top-0 -left-1.5 w-3 h-3 bg-primary" style={{ clipPath: 'polygon(0 0, 100% 0, 50% 100%)' }} />
             <div className="absolute inset-0 w-full h-full shadow-[0_0_10px_rgba(79,110,247,0.8)]" />
           </div>
