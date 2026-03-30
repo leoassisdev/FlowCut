@@ -27,7 +27,6 @@ export default function ExportPage() {
   const [exportProgress, setExportProgress] = useState(0);
   const [exportSuccess, setExportSuccess] = useState(false);
   
-  // Alterado para mostrar erros detalhados
   const [error, setError] = useState<string | null>(null);
 
   if (!project) {
@@ -103,12 +102,8 @@ export default function ExportPage() {
 
     } catch (err: any) {
       console.error("DEBUG EXPORT:", err);
-      
-      // MÁGICA: O Tauri manda o erro como uma string crua vinda do Rust. 
-      // Agora o React vai mostrar na tela sem mascarar!
       const errorMessage = typeof err === 'string' ? err : (err.message || "Erro desconhecido ao exportar o projeto.");
       setError(errorMessage);
-      
     } finally {
       setIsExporting(false);
       if (unlisten) unlisten();
@@ -180,8 +175,9 @@ export default function ExportPage() {
                 disabled={isExporting}
               />
               <div className="flex flex-col">
-                <Label htmlFor="burn-captions" className="text-base font-semibold cursor-pointer">Queimar Legendas no Vídeo</Label>
-                <span className="text-sm text-muted-foreground">O FFmpeg vai renderizar o texto perfeitamente sincronizado com a sua fala no vídeo final.</span>
+                {/* Alterado texto visual */}
+                <Label htmlFor="burn-captions" className="text-base font-semibold cursor-pointer">Embutir Legendas Nativas no Vídeo</Label>
+                <span className="text-sm text-muted-foreground">Adiciona a transcrição gerada pela IA como uma faixa de legenda (.mp4) ativável e desativável pelo usuário.</span>
               </div>
             </div>
 
@@ -191,7 +187,6 @@ export default function ExportPage() {
                   <AlertCircle className="w-5 h-5 shrink-0" />
                   <span>Erro de Renderização</span>
                 </div>
-                {/* Aqui está o dedurador oficial do FFmpeg */}
                 <pre className="text-[10px] font-mono bg-black/20 p-2 rounded max-h-40 overflow-y-auto whitespace-pre-wrap">
                   {error}
                 </pre>

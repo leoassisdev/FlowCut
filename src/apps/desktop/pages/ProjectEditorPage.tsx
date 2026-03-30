@@ -6,6 +6,7 @@ import { useKeyboardShortcuts } from '@/apps/desktop/hooks/useKeyboardShortcuts'
 import PreviewPlayer from '@/apps/desktop/components/PreviewPlayer';
 import TranscriptPanel from '@/apps/desktop/components/TranscriptPanel';
 import SemanticTimelinePanel from '@/apps/desktop/components/SemanticTimelinePanel';
+import RemoverViciosPanel from '../components/RemoverViciosPanel';
 import PresetsPanel from '@/apps/desktop/components/PresetsPanel';
 import CaptionPanel from '@/apps/desktop/components/CaptionPanel';
 import JobsPanelEnhanced from '@/apps/desktop/components/JobsPanelEnhanced';
@@ -178,6 +179,13 @@ export default function ProjectEditorPage() {
                     className={`px-3 h-full text-[10px] tracking-widest uppercase transition-colors ${rightTab === 'autocut' ? 'text-[#10b981] border-b border-[#10b981]' : 'text-[#333] hover:text-[#666]'}`}
                   >
                     REMOVER SILÊNCIOS
+                  </button>
+                  <div className="w-px h-3 bg-[#1c1c20] mx-1" />
+                  <button 
+                    onClick={() => setRightTab(rightTab === 'fillers' as any ? 'info' : 'fillers' as any)} 
+                    className={`px-3 h-full text-[10px] tracking-widest uppercase transition-colors ${rightTab === 'fillers' ? 'text-[#10b981] border-b border-[#10b981]' : 'text-[#333] hover:text-[#666]'}`}
+                  >
+                    REMOVER VÍCIOS
                   </button>
 
                   <div className="w-px h-3 bg-[#1c1c20] mx-1" />

@@ -360,66 +360,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   },
 
   rebuildTimeline: async () => {
-    const project = get().project;
-    if (!project?.transcript || !project.semanticTimeline) return;
-
-    set({ isRebuilding: true, rebuildProgress: 0 });
-    const originalDurationMs = project.sourceVideo?.durationMs ?? project.semanticTimeline.originalDurationMs;
-    
-    const allWords = project.transcript.segments.flatMap(s => s.words).filter(w => !w.isRemoved);
-    
-    if (allWords.length === 0) {
-      set({ isRebuilding: false, rebuildProgress: 100 });
-      setTimeout(() => set({ rebuildProgress: 0 }), 300);
-      return;
-    }
-
-    allWords.sort((a, b) => a.startMs - b.startMs);
-
-    const newCuts: TimelineCut[] = [];
-    let currentCutStart = allWords[0].startMs;
-    let currentCutEnd = allWords[0].endMs;
-    let currentLabel = allWords[0].word;
-    let totalDurationMs = 0;
-    let cutIndex = 0;
-
-    for (let i = 1; i < allWords.length; i++) {
-      const w = allWords[i];
-      const gap = w.startMs - currentCutEnd;
-
-      if (gap > 300) {
-        const label = currentLabel.length > 40 ? currentLabel.slice(0, 40) + '…' : currentLabel;
-        newCuts.push({ id: `cut-rebuild-${cutIndex++}`, startMs: currentCutStart, endMs: currentCutEnd, type: 'keep', sourceSegmentId: 'rebuild', label } as TimelineCut);
-        totalDurationMs += (currentCutEnd - currentCutStart);
-
-        currentCutStart = w.startMs;
-        currentCutEnd = w.endMs;
-        currentLabel = w.word;
-      } else {
-        currentCutEnd = w.endMs;
-        currentLabel += ` ${w.word}`;
-      }
-
-      if (i % Math.max(1, Math.floor(allWords.length / 10)) === 0) {
-        set({ rebuildProgress: Math.round((i / allWords.length) * 90) });
-        await new Promise(r => setTimeout(r, 5));
-      }
-    }
-    
-    const lastLabel = currentLabel.length > 40 ? currentLabel.slice(0, 40) + '…' : currentLabel;
-    newCuts.push({ id: `cut-rebuild-${cutIndex}`, startMs: currentCutStart, endMs: currentCutEnd, type: 'keep', sourceSegmentId: 'rebuild', label: lastLabel } as TimelineCut);
-    totalDurationMs += (currentCutEnd - currentCutStart);
-
-    set({
-      project: {
-        ...project,
-        semanticTimeline: { ...project.semanticTimeline, cuts: newCuts, totalDurationMs, originalDurationMs },
-      },
-    });
-
-    get().markDirty();
-    set({ isRebuilding: false, rebuildProgress: 100 });
-    setTimeout(() => set({ rebuildProgress: 0 }), 300);
+    // Agora o rebuild simplesmente delega para o applyAutoCut 
+    // para garantir que Texto e Áudio andem sempre de mãos dadas!
+    await get().applyAutoCut();
   },
 
   applyAutoCut: async () => {
@@ -429,56 +372,99 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     if (!filePath) return;
     set({ isRebuilding: true, rebuildProgress: 10 });
 
-    const noiseDb = get().silenceNoiseDb;
-    const minDuration = get().silenceMinDuration;
     const videoDurationMs = project.sourceVideo.durationMs;
     const originalDurationMs = project.semanticTimeline.originalDurationMs || videoDurationMs;
 
-    // Restaura timeline pro video inteiro antes de reprocessar
-    const fullCut = { id: 'cut-pre-ac', startMs: 0, endMs: videoDurationMs, type: 'keep', sourceSegmentId: 'full', label: 'Full' } as TimelineCut;
-    set({ project: { ...get().project!, semanticTimeline: { ...get().project!.semanticTimeline!, cuts: [fullCut], totalDurationMs: videoDurationMs, originalDurationMs } } });
+    // ETAPA 1: Criar Cortes Base (olhando APENAS para as palavras mantidas)
+    let baseCuts: TimelineCut[] = [];
+    if (project.transcript?.segments) {
+      const allWords = project.transcript.segments.flatMap(s => s.words).filter(w => !w.isRemoved);
+      if (allWords.length > 0) {
+        allWords.sort((a, b) => a.startMs - b.startMs);
+        let currentCutStart = allWords[0].startMs;
+        let currentCutEnd = allWords[0].endMs;
+        let currentLabel = allWords[0].word;
+        let cutIndex = 0;
 
+        for (let i = 1; i < allWords.length; i++) {
+          const w = allWords[i];
+          const gap = w.startMs - currentCutEnd;
+          if (gap > 300) {
+            const label = currentLabel.length > 40 ? currentLabel.slice(0, 40) + '…' : currentLabel;
+            baseCuts.push({ id: `cut-base-${cutIndex++}`, startMs: currentCutStart, endMs: currentCutEnd, type: 'keep', sourceSegmentId: 'auto', label } as TimelineCut);
+            currentCutStart = w.startMs;
+            currentCutEnd = w.endMs;
+            currentLabel = w.word;
+          } else {
+            currentCutEnd = w.endMs;
+            currentLabel += ` ${w.word}`;
+          }
+        }
+        const lastLabel = currentLabel.length > 40 ? currentLabel.slice(0, 40) + '…' : currentLabel;
+        baseCuts.push({ id: `cut-base-${cutIndex}`, startMs: currentCutStart, endMs: currentCutEnd, type: 'keep', sourceSegmentId: 'auto', label: lastLabel } as TimelineCut);
+      }
+    }
+    
+    // Se não houver palavras mantidas ou transcricao, usa o vídeo inteiro como base
+    if (baseCuts.length === 0) {
+      baseCuts.push({ id: 'cut-base-0', startMs: 0, endMs: videoDurationMs, type: 'keep', sourceSegmentId: 'full', label: 'Video Completo' } as TimelineCut);
+    }
+
+    // ETAPA 2: Buscar Silencios de Áudio (FFmpeg via backend)
+    const noiseDb = get().silenceNoiseDb;
+    const minDuration = get().silenceMinDuration;
     const result = await detectSilences(filePath, noiseDb, minDuration);
 
     if (!result || result.silences.length === 0) {
-      const noSilenceCut = { id: 'cut-full', startMs: 0, endMs: videoDurationMs, type: 'keep', sourceSegmentId: 'full', label: 'Sem silencios' } as TimelineCut;
-      set({ project: { ...project, semanticTimeline: { ...project.semanticTimeline, cuts: [noSilenceCut], totalDurationMs: videoDurationMs, originalDurationMs } } });
+      // Se nao tem silencios, a base de palavras é o resultado final
+      const totalMs = baseCuts.reduce((acc, c) => acc + (c.endMs - c.startMs), 0);
+      set({ project: { ...project, semanticTimeline: { ...project.semanticTimeline, cuts: baseCuts, totalDurationMs: totalMs, originalDurationMs } } });
       set({ isRebuilding: false, rebuildProgress: 100 });
       setTimeout(() => set({ rebuildProgress: 0 }), 300);
       return;
     }
+
     set({ rebuildProgress: 60 });
 
-    const silences = result.silences;
-    const newCuts: TimelineCut[] = [];
-    let cutIndex = 0;
+    // ETAPA 3: INTERSECÇÃO (Subtrair os silêncios de áudio dos Cortes Base)
+    const finalCuts: TimelineCut[] = [];
     let totalKeptMs = 0;
-    let cursor = 0;
+    let cutIndex = 0;
 
-    for (const silence of silences) {
-      if (silence.start_ms > cursor) {
-        newCuts.push({ id: `cut-ac-${cutIndex++}`, startMs: cursor, endMs: silence.start_ms, type: 'keep', sourceSegmentId: 'auto', label: `Fala ${cutIndex}` } as TimelineCut);
-        totalKeptMs += (silence.start_ms - cursor);
+    for (const cut of baseCuts) {
+      const overlappingSilences = result.silences.filter(s => s.start_ms < cut.endMs && s.end_ms > cut.startMs);
+      if (overlappingSilences.length === 0) {
+        finalCuts.push({ ...cut, id: `cut-ac-${cutIndex++}` });
+        totalKeptMs += (cut.endMs - cut.startMs);
+        continue;
       }
-      cursor = silence.end_ms;
-    }
-    if (cursor < videoDurationMs) {
-      newCuts.push({ id: `cut-ac-${cutIndex++}`, startMs: cursor, endMs: videoDurationMs, type: 'keep', sourceSegmentId: 'auto', label: `Fala ${cutIndex}` } as TimelineCut);
-      totalKeptMs += (videoDurationMs - cursor);
+      
+      let cursor = cut.startMs;
+      for (const silence of overlappingSilences) {
+        const silStart = Math.max(silence.start_ms, cut.startMs);
+        const silEnd = Math.min(silence.end_ms, cut.endMs);
+        if (cursor < silStart) {
+          finalCuts.push({ ...cut, id: `cut-ac-${cutIndex++}`, startMs: cursor, endMs: silStart } as TimelineCut);
+          totalKeptMs += (silStart - cursor);
+        }
+        cursor = silEnd;
+      }
+      if (cursor < cut.endMs) {
+        finalCuts.push({ ...cut, id: `cut-ac-${cutIndex++}`, startMs: cursor, endMs: cut.endMs } as TimelineCut);
+        totalKeptMs += (cut.endMs - cursor);
+      }
     }
 
     set({
       project: {
         ...project,
-        semanticTimeline: { ...project.semanticTimeline, cuts: newCuts, totalDurationMs: totalKeptMs, originalDurationMs },
+        semanticTimeline: { ...project.semanticTimeline, cuts: finalCuts, totalDurationMs: totalKeptMs, originalDurationMs },
       },
     });
     get().markDirty();
     set({ isRebuilding: false, rebuildProgress: 100 });
     setTimeout(() => set({ rebuildProgress: 0 }), 300);
   },
-
-
   removeFillers: () => {
     const project = get().project;
     if (!project?.transcript) return;
@@ -487,14 +473,13 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       'é', 'eh', 'éh', 'hum', 'uh', 'ah', 'ahm', 'uhm', 'hmm', 'hm', 'um',
       'tipo', 'né', 'ne', 'então', 'entao', 'assim', 'basicamente',
       'literalmente', 'enfim', 'bom', 'ahn', 'eeh',
-      'tá', 'ta', 'daí', 'dai', 'sabe', 'viu', 'né', 'mano',
+      'tá', 'ta', 'daí', 'dai', 'sabe', 'viu', 'mano'
     ];
 
     const SILENCE_GAP_MS = 200;
     const newProject = structuredClone(project);
     let removedCount = 0;
 
-    // Coleta todas as palavras em ordem com referencia ao segmento
     const allWords: any[] = [];
     for (const seg of newProject.transcript.segments) {
       for (const w of seg.words) {
@@ -505,18 +490,17 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     for (let i = 0; i < allWords.length; i++) {
       const w = allWords[i];
       if (w.isRemoved) continue;
+      
       const normalized = w.word.toLowerCase().replace(/[.,!?]/g, '').trim();
       const isFiller = w.isFillerWord || FILLER_WORDS_PT.includes(normalized);
       if (!isFiller) continue;
 
-      // Verifica contexto: silencio ANTES ou DEPOIS da palavra
       const prevWord = i > 0 ? allWords[i - 1] : null;
       const nextWord = i < allWords.length - 1 ? allWords[i + 1] : null;
 
       const gapBefore = prevWord ? (w.startMs - prevWord.endMs) : 9999;
       const gapAfter = nextWord ? (nextWord.startMs - w.endMs) : 9999;
 
-      // So remove se tiver silencio antes OU depois (contexto de enrolacao)
       if (gapBefore >= SILENCE_GAP_MS || gapAfter >= SILENCE_GAP_MS) {
         w.isRemoved = true;
         removedCount++;
@@ -526,10 +510,10 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     if (removedCount > 0) {
       set({ project: newProject as any });
       get().markDirty();
-      // Rebuild timeline automaticamente
       get().rebuildTimeline();
     }
   },
+
   applyPreset: (preset: StylePreset) => { const project = get().project; if (!project) return; get().executeCommand(createApplyPresetCommand(preset, project.appliedPreset)); },
   setState: (state: PipelineState) => { const project = get().project; if (!project) return; set({ project: { ...project, state } as any }); },
   

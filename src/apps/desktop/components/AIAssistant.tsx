@@ -15,7 +15,7 @@ export default function AIAssistant() {
             <div className="flex items-center justify-between p-3 border-b border-[#222] bg-[#1a1a20]">
                <div className="flex items-center gap-2 text-[#4f6ef7]">
                  <Cpu className="w-4 h-4" />
-                 <span className="text-[11px] font-bold">AI FLOW ASSISTANT</span>
+                 <span className="text-[11px] font-bold">FLOW IA</span>
                </div>
                <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
             </div>
@@ -69,7 +69,7 @@ export default function AIAssistant() {
         </div>
 
         <div className="flex flex-col items-start">
-           <span className="text-[11px] font-bold text-[#eee] tracking-widest group-hover:text-white transition-colors">FLOW ASSISTANT</span>
+           <span className="text-[11px] font-bold text-[#eee] tracking-widest group-hover:text-white transition-colors">FLOW IA</span>
         </div>
         
         <div className="w-5 h-5 bg-[#222] rounded-full flex items-center justify-center ml-2">
