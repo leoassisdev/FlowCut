@@ -24,9 +24,9 @@ export default function PresetsPanel({ appliedPreset }: Props) {
   const { applyPreset } = useProjectStore();
 
   return (
-    <div className="flex flex-col h-1/2">
+    <div className="flex flex-col h-full">
       <div className="px-4 py-3 border-b border-border">
-        <h3 className="text-sm font-medium">Presets</h3>
+        <h3 className="text-sm font-medium">Presets Inteligentes</h3>
       </div>
       <ScrollArea className="flex-1 p-3">
         <div className="space-y-2">
@@ -47,7 +47,7 @@ export default function PresetsPanel({ appliedPreset }: Props) {
                   <Icon className={`w-4 h-4 ${isActive ? 'text-primary' : 'text-muted-foreground'}`} />
                   <span className="text-sm font-medium">{preset.name}</span>
                 </div>
-                <p className="text-xs text-muted-foreground mt-1 line-clamp-2">{preset.description}</p>
+                <p className="text-xs text-muted-foreground mt-1">{preset.description}</p>
               </button>
             );
           })}

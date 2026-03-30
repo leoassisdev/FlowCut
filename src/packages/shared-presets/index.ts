@@ -9,8 +9,8 @@ import type { StylePreset } from '../shared-types';
 
 export const PRESET_PODCAST: StylePreset = {
   id: 'preset-podcast',
-  name: 'Podcast Clean',
-  description: 'Remove filler words and long silences. Optimized for talking-head podcast recordings.',
+  name: 'Podcast Limpo',
+  description: 'Remove palavras de preenchimento e silêncios longos. Otimizado para gravações de podcast.',
   category: 'podcast',
   config: {
     removeFiller: true,
@@ -25,8 +25,8 @@ export const PRESET_PODCAST: StylePreset = {
 
 export const PRESET_YOUTUBE: StylePreset = {
   id: 'preset-youtube',
-  name: 'YouTube Engaging',
-  description: 'Aggressive cuts, zoom on emphasis, designed for high-retention YouTube content.',
+  name: 'YouTube Dinâmico',
+  description: 'Cortes agressivos, zoom em ênfases. Projetado para alta retenção no YouTube.',
   category: 'youtube',
   config: {
     removeFiller: true,
@@ -41,8 +41,8 @@ export const PRESET_YOUTUBE: StylePreset = {
 
 export const PRESET_SHORT: StylePreset = {
   id: 'preset-short',
-  name: 'Short / Reels',
-  description: 'Vertical reframe, karaoke captions, fast pace for TikTok / Reels / Shorts.',
+  name: 'Reels / TikTok',
+  description: 'Reenquadramento vertical, legendas karaokê, ritmo rápido para TikTok e Reels.',
   category: 'short',
   config: {
     removeFiller: true,
@@ -57,8 +57,8 @@ export const PRESET_SHORT: StylePreset = {
 
 export const PRESET_PRESENTATION: StylePreset = {
   id: 'preset-presentation',
-  name: 'Presentation Polish',
-  description: 'Light cleanup preserving natural pauses. Ideal for lectures, talks and webinars.',
+  name: 'Apresentação Polida',
+  description: 'Limpeza leve preservando pausas naturais. Ideal para aulas, palestras e webinars.',
   category: 'presentation',
   config: {
     removeFiller: true,

@@ -73,6 +73,7 @@ export default function ProjectEditorPage() {
       }
       
       if (e.code === 'Space') {
+        e.preventDefault();
         const state = useProjectStore.getState();
         const selectedId = state.selectedCutId;
         
@@ -86,6 +87,8 @@ export default function ProjectEditorPage() {
              setIsPlaying(true);
              return;
           }
+        } else {
+          state.setIsPlaying(!state.isPlaying);
         }
       }
     };
