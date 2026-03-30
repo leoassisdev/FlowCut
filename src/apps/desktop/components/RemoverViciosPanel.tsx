@@ -10,7 +10,7 @@ const INITIAL_FILLERS = [
 ];
 
 export default function RemoverViciosPanel() {
-  const { project, markDirty } = useProjectStore();
+  const { project, markDirty, fillerGapMs, setFillerGapMs } = useProjectStore();
   const [customWord, setCustomWord] = useState('');
   const [fillerList, setFillerList] = useState<string[]>(INITIAL_FILLERS);
 
@@ -39,18 +39,25 @@ export default function RemoverViciosPanel() {
     const proj = state.project;
     if (!proj?.transcript) return;
     const newProject = JSON.parse(JSON.stringify(proj));
+    const allW: any[] = [];
+    for (const seg of newProject.transcript.segments) { for (const w of seg.words) allW.push(w); }
+    for (const w of allW) { const n = w.word.toLowerCase().replace(/[.,!?]/g, "").trim(); if (fillerList.includes(n) && w.isRemoved) w.isRemoved = false; }
     let removedCount = 0;
-    for (const seg of newProject.transcript.segments) {
-      for (const w of seg.words) {
-        if (w.isRemoved) continue;
-        const normalized = w.word.toLowerCase().replace(/[.,!?]/g, '').trim();
-        if (fillerList.includes(normalized)) {
-          w.isRemoved = true;
-          removedCount++;
-        }
+    for (let i = 0; i < allW.length; i++) {
+      const w = allW[i];
+      if (w.isRemoved) continue;
+      const normalized = w.word.toLowerCase().replace(/[.,!?]/g, "").trim();
+      if (!fillerList.includes(normalized)) continue;
+      const prev = i > 0 ? allW[i - 1] : null;
+      const next = i < allW.length - 1 ? allW[i + 1] : null;
+      const gapBefore = prev ? (w.startMs - prev.endMs) : 9999;
+      const gapAfter = next ? (next.startMs - w.endMs) : 9999;
+      if (gapBefore >= (fillerGapMs || 500) || gapAfter >= (fillerGapMs || 500)) {
+        w.isRemoved = true;
+        removedCount++;
       }
     }
-    if (removedCount > 0) {
+    { // sempre atualiza (reset + nova detecao)
       useProjectStore.setState({ project: newProject });
       state.markDirty();
     }
@@ -69,6 +76,14 @@ export default function RemoverViciosPanel() {
         >
           APLICAR REMOÇÃO
         </button>
+        <div className="space-y-1">
+          <div className="flex justify-between">
+            <h3 className="text-[10px] text-[#aaa] font-bold uppercase tracking-wider">Sensibilidade do Gap</h3>
+            <span className="text-[10px] text-[#10b981]">{fillerGapMs || 500}ms</span>
+          </div>
+          <input type="range" min={100} max={2000} step={50} value={fillerGapMs || 500} onChange={e => setFillerGapMs(Number(e.target.value))} className="w-full h-1 bg-[#333] rounded-lg appearance-none cursor-pointer accent-[#10b981]" />
+          <div className="flex justify-between text-[9px] text-[#555]"><span>100ms (agressivo)</span><span>2000ms (conservador)</span></div>
+        </div>
         <div className="space-y-2">
           <h3 className="text-[10px] text-[#aaa] font-bold uppercase tracking-wider">Adicione Palavras na sua Lista</h3>
           <div className="flex gap-2">

@@ -147,6 +147,8 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     }, 500);
   },
   silenceMinDuration: 0.3,
+  fillerGapMs: 500,
+  setFillerGapMs: (ms: number) => set({ fillerGapMs: ms }),
   setSilenceMinDuration: (d: number) => {
     set({ silenceMinDuration: d });
     clearTimeout((window as any).__acDebounce);
@@ -516,7 +518,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       'tá', 'ta', 'daí', 'dai', 'sabe', 'viu', 'mano'
     ];
 
-    const SILENCE_GAP_MS = 200;
+    const SILENCE_GAP_MS = get().fillerGapMs || 500;
     const newProject = structuredClone(project);
     let removedCount = 0;
 
