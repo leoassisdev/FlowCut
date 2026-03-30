@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { ChevronDown, ChevronUp, Cpu } from 'lucide-react';
 import { useProjectStore } from '../store/project-store';
 
-export default function AIAssistant() {
+export default function AIAssistant({ onOpenTab }: { onOpenTab?: (tab: string) => void }) {
   const [isOpen, setIsOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -35,7 +35,7 @@ export default function AIAssistant() {
                     <span className="text-yellow-500 mr-1">●</span>
                     Longas pausas detectadas no áudio. Removê-las melhora a retenção do vídeo.
                   </p>
-                  <button onClick={() => { applyAutoCut(); setIsOpen(false); }} className="px-3 py-1.5 bg-yellow-500/10 border border-yellow-500/30 text-yellow-500 text-[9px] uppercase tracking-wider rounded hover:bg-yellow-500/20 transition-colors">
+                  <button onClick={() => { applyAutoCut(); onOpenTab?.("autocut"); setIsOpen(false); }} className="px-3 py-1.5 bg-yellow-500/10 border border-yellow-500/30 text-yellow-500 text-[9px] uppercase tracking-wider rounded hover:bg-yellow-500/20 transition-colors">
                     Remover Silêncios
                   </button>
                </div>
@@ -47,7 +47,7 @@ export default function AIAssistant() {
                     <span className="text-emerald-500 mr-1">●</span>
                     Encontradas 8 palavras de preenchimento (ééé, hum, tipo). O corte poupará 12s.
                   </p>
-                  <button onClick={() => { removeFillers(); setIsOpen(false); }} className="px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/30 text-emerald-500 text-[9px] uppercase tracking-wider rounded hover:bg-emerald-500/20 transition-colors">Remover Vícios</button>
+                  <button onClick={() => { removeFillers(); onOpenTab?.("fillers"); setIsOpen(false); }} className="px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/30 text-emerald-500 text-[9px] uppercase tracking-wider rounded hover:bg-emerald-500/20 transition-colors">Remover Vícios</button>
                </div>
                
                <div className="w-full h-px bg-[#222]" />

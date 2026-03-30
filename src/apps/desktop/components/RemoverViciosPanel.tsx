@@ -53,7 +53,6 @@ export default function RemoverViciosPanel() {
     if (removedCount > 0) {
       useProjectStore.setState({ project: newProject });
       state.markDirty();
-      state.rebuildTimeline();
     }
   };
 

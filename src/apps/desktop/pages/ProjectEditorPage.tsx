@@ -236,7 +236,7 @@ export default function ProjectEditorPage() {
           </Panel>
         </PanelGroup>
       </div>
-      <AIAssistant />
+      <AIAssistant onOpenTab={(tab: string) => setRightTab(tab)} />
     </div>
   </>);
 }

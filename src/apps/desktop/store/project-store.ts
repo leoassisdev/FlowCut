@@ -341,19 +341,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       // Auto-rebuild timeline com debounce
       clearTimeout((window as any).__rebuildDebounce);
       (window as any).__rebuildDebounce = setTimeout(() => {
-        // rebuild inline sem apagar silencios
-      const proj2 = get().project;
-      if (proj2?.semanticTimeline) {
-        const kept = proj2.transcript?.segments?.flatMap((s2: any) => s2.words).filter((w2: any) => !w2.isRemoved) || [];
-        if (kept.length > 0) {
-          kept.sort((a2: any, b2: any) => a2.startMs - b2.startMs);
-          const newCuts2: TimelineCut[] = []; let cs = kept[0].startMs, ce = kept[0].endMs, cl = kept[0].word, ci = 0;
-          for (let j = 1; j < kept.length; j++) { const kw = kept[j]; if (kw.startMs - ce > 300) { newCuts2.push({ id: `cut-fv-${ci++}`, startMs: cs, endMs: ce, type: "keep", sourceSegmentId: "auto", label: cl.slice(0,40) } as TimelineCut); cs = kw.startMs; ce = kw.endMs; cl = kw.word; } else { ce = kw.endMs; cl += " " + kw.word; } }
-          newCuts2.push({ id: `cut-fv-${ci}`, startMs: cs, endMs: ce, type: "keep", sourceSegmentId: "auto", label: cl.slice(0,40) } as TimelineCut);
-          const tm = newCuts2.reduce((ac: number, cx: any) => ac + (cx.endMs - cx.startMs), 0);
-          set({ project: { ...proj2, semanticTimeline: { ...proj2.semanticTimeline, cuts: newCuts2, totalDurationMs: tm } } });
-        }
-      }
+        get().rebuildTimeline();
       }, 400);
     }
   },
@@ -545,19 +533,6 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     if (removedCount > 0) {
       set({ project: newProject as any });
       get().markDirty();
-      // rebuild inline sem apagar silencios
-      const proj2 = get().project;
-      if (proj2?.semanticTimeline) {
-        const kept = proj2.transcript?.segments?.flatMap((s2: any) => s2.words).filter((w2: any) => !w2.isRemoved) || [];
-        if (kept.length > 0) {
-          kept.sort((a2: any, b2: any) => a2.startMs - b2.startMs);
-          const newCuts2: TimelineCut[] = []; let cs = kept[0].startMs, ce = kept[0].endMs, cl = kept[0].word, ci = 0;
-          for (let j = 1; j < kept.length; j++) { const kw = kept[j]; if (kw.startMs - ce > 300) { newCuts2.push({ id: `cut-fv-${ci++}`, startMs: cs, endMs: ce, type: "keep", sourceSegmentId: "auto", label: cl.slice(0,40) } as TimelineCut); cs = kw.startMs; ce = kw.endMs; cl = kw.word; } else { ce = kw.endMs; cl += " " + kw.word; } }
-          newCuts2.push({ id: `cut-fv-${ci}`, startMs: cs, endMs: ce, type: "keep", sourceSegmentId: "auto", label: cl.slice(0,40) } as TimelineCut);
-          const tm = newCuts2.reduce((ac: number, cx: any) => ac + (cx.endMs - cx.startMs), 0);
-          set({ project: { ...proj2, semanticTimeline: { ...proj2.semanticTimeline, cuts: newCuts2, totalDurationMs: tm } } });
-        }
-      }
     }
   },
 
