@@ -380,7 +380,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       }
       cuts.push({ id: `cut-rb-${idx}`, startMs: cStart, endMs: cEnd, type: "keep", sourceSegmentId: "auto", label: cLabel.slice(0,40) } as TimelineCut);
     } else {
-      cuts.push({ id: "cut-rb-full", startMs: 0, endMs: videoDurationMs, type: "keep", sourceSegmentId: "full", label: "Video Completo" } as TimelineCut);
+      cuts = [];
     }
     const savedSil = (get() as any).savedSilences || [];
     let finalCuts: TimelineCut[] = [];
