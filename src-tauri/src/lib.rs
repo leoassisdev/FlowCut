@@ -216,7 +216,7 @@ fn detect_silences(file_path: String, noise_db: f64, min_duration: f64) -> Resul
     })
 }
 
-// ─── EXPORTAÇÃO INTELIGENTE (SEM FILTRO DE LEGENDA / MUXING NATIVO) ───
+// ─── EXPORTAÇÃO INTELIGENTE (GERADOR DE ARQUIVO .SRT) ───
 #[tauri::command]
 fn export_video(app: tauri::AppHandle, request: ExportRequest) -> Result<ProcessingResult, String> {
     if request.cuts.is_empty() { return Err("A timeline está vazia. Não há nada para exportar.".to_string()); }
@@ -231,8 +231,9 @@ fn export_video(app: tauri::AppHandle, request: ExportRequest) -> Result<Process
     let _ = app.emit("export-progress", ProgressPayload { progress: 5 });
 
     let mut has_subtitles = false;
+    let srt_path = format!("{}/subs.srt", tmp_dir);
+    
     if let Some(srt_content) = &request.subtitles {
-        let srt_path = format!("{}/subs.srt", tmp_dir);
         std::fs::write(&srt_path, srt_content).map_err(|e| format!("Falha ao gravar arquivo de legendas: {}", e))?;
         has_subtitles = true;
     }
@@ -258,7 +259,6 @@ fn export_video(app: tauri::AppHandle, request: ExportRequest) -> Result<Process
     let mut cmd = Command::new("ffmpeg");
     cmd.current_dir(&tmp_dir);
 
-    // MÁGICA DE EXPORTAÇÃO SEGURA: Muxar as legendas nativamente em vez de usar o filter_graph!
     let mut args = vec![
         "-y".to_string(), 
         "-f".to_string(), "concat".to_string(), 
@@ -266,18 +266,16 @@ fn export_video(app: tauri::AppHandle, request: ExportRequest) -> Result<Process
         "-i".to_string(), "concat.txt".to_string()
     ];
     
-    // Se tiver legenda, adiciona ela como um INPUT separado (embutir no MP4)
     if has_subtitles { 
         args.push("-i".to_string()); 
         args.push("subs.srt".to_string()); 
     }
     
     args.extend([
-        "-map".to_string(), "0:v".to_string(), // Pega apenas a faixa de vídeo do original
-        "-map".to_string(), "0:a?".to_string(), // Pega apenas a faixa de áudio
+        "-map".to_string(), "0:v".to_string(), 
+        "-map".to_string(), "0:a?".to_string(), 
     ]);
 
-    // Se tiver legenda, mapeia a legenda do input secundário
     if has_subtitles {
         args.extend(["-map".to_string(), "1:0".to_string()]); 
     }
@@ -290,7 +288,6 @@ fn export_video(app: tauri::AppHandle, request: ExportRequest) -> Result<Process
         "-b:a".to_string(), "192k".to_string(), 
     ]);
 
-    // Avisa que o codec da legenda será compatível com container MP4
     if has_subtitles {
         args.extend(["-c:s".to_string(), "mov_text".to_string()]); 
     }
@@ -307,6 +304,12 @@ fn export_video(app: tauri::AppHandle, request: ExportRequest) -> Result<Process
         let error_log = String::from_utf8_lossy(&result.stderr);
         let _ = std::fs::remove_dir_all(&tmp_dir); 
         return Err(format!("Erro interno do FFmpeg:\n{}", error_log)); 
+    }
+
+    // MÁGICA: Além de embutir no MP4, copiamos o arquivo .SRT para a pasta final para o usuário usar livremente!
+    if has_subtitles {
+        let final_srt_path = request.output_path.replace(".mp4", ".srt");
+        let _ = std::fs::copy(&srt_path, final_srt_path);
     }
 
     let _ = std::fs::remove_dir_all(&tmp_dir);

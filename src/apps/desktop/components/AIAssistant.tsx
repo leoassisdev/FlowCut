@@ -1,192 +1,91 @@
-import { useState, useCallback } from 'react';
-import { useProjectStore } from '@/apps/desktop/store/project-store';
-import { ChevronDown, ChevronUp, Cpu, Check, Loader2 } from 'lucide-react';
-
-type AssistantState = 'idle' | 'analyzing' | 'ready' | 'applied';
-
-interface Suggestion {
-  id: string;
-  message: string;
-  action: string;
-  severity: 'info' | 'warning' | 'suggestion';
-  applied?: boolean;
-}
-
-const MOCK_SUGGESTIONS: Suggestion[] = [
-  {
-    id: 'sug-1',
-    message: 'Detected long pauses between 00:01:20 and 00:01:45. Removing them will improve pacing.',
-    action: 'Remove Silences',
-    severity: 'warning',
-  },
-  {
-    id: 'sug-2',
-    message: 'Found 8 filler words (uh, né, tipo). Removing them reduces 12s from the final cut.',
-    action: 'Remove Fillers',
-    severity: 'suggestion',
-  },
-  {
-    id: 'sug-3',
-    message: 'Segment at 00:02:10 has low engagement markers. Consider applying an engaging preset.',
-    action: 'Apply Engaging Preset',
-    severity: 'info',
-  },
-  {
-    id: 'sug-4',
-    message: 'No captions generated yet. Captions increase retention by ~40% for social content.',
-    action: 'Generate Captions',
-    severity: 'suggestion',
-  },
-];
-
-const SEVERITY_COLORS = {
-  info:       { dot: 'bg-[#4f6ef7]',  text: 'text-[#4f6ef7]',  border: 'border-[#1e2a4a]' },
-  warning:    { dot: 'bg-[#f7c84f]',  text: 'text-[#f7c84f]',  border: 'border-[#2a2a14]' },
-  suggestion: { dot: 'bg-[#4faa6f]',  text: 'text-[#4faa6f]',  border: 'border-[#1a2a1a]' },
-};
+import { useState } from 'react';
+import { ChevronDown, ChevronUp, Cpu } from 'lucide-react';
+import { useProjectStore } from '../store/project-store';
 
 export default function AIAssistant() {
-  const [expanded, setExpanded] = useState(false);
-  const [state, setState] = useState<AssistantState>('ready');
-  const [suggestions, setSuggestions] = useState<Suggestion[]>(MOCK_SUGGESTIONS);
-  const [appliedLog, setAppliedLog] = useState<string[]>([]);
-
-  const { applyPreset, generateCaptions, generateBrollCues } = useProjectStore();
-
-  const handleAction = useCallback((sug: Suggestion) => {
-    setState('analyzing');
-
-    setTimeout(() => {
-      // Mock actions
-      if (sug.action === 'Generate Captions') generateCaptions();
-      if (sug.action === 'Suggest B-Roll') generateBrollCues();
-
-      setSuggestions(prev =>
-        prev.map(s => s.id === sug.id ? { ...s, applied: true } : s)
-      );
-      setAppliedLog(prev => [
-        `${new Date().toLocaleTimeString('en', { hour12: false })} — ${sug.action} applied`,
-        ...prev,
-      ]);
-      setState('applied');
-
-      setTimeout(() => setState('ready'), 1500);
-    }, 800);
-  }, [generateCaptions, generateBrollCues]);
-
-  const analyze = useCallback(() => {
-    setState('analyzing');
-    setSuggestions(prev => prev.map(s => ({ ...s, applied: false })));
-    setTimeout(() => setState('ready'), 1200);
-  }, []);
+  const [isOpen, setIsOpen] = useState(false);
+  const applyAutoCut = useProjectStore(s => s.applyAutoCut);
 
   return (
-    <div className="fixed bottom-4 right-4 z-50 font-mono select-none">
-      {/* Expanded panel */}
-      {expanded && (
-        <div className="mb-2 w-[300px] bg-[#0d0d10] border border-[#1e1e28] rounded-sm shadow-[0_8px_40px_rgba(0,0,0,0.8)] overflow-hidden">
-
-          {/* Panel header */}
-          <div className="flex items-center justify-between px-3 py-2 border-b border-[#1a1a20]">
-            <div className="flex items-center gap-2">
-              <Cpu className="w-3 h-3 text-[#4f6ef7]" />
-              <span className="text-[10px] uppercase tracking-widest text-[#666]">AI FLOW ASSISTENT</span>
+    <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end">
+      
+      {/* ── O PAINEL DE INTELIGÊNCIA ── */}
+      {isOpen && (
+         <div className="mb-3 w-80 bg-[#111115] border border-[#222] rounded-lg shadow-2xl overflow-hidden flex flex-col font-mono">
+            <div className="flex items-center justify-between p-3 border-b border-[#222] bg-[#1a1a20]">
+               <div className="flex items-center gap-2 text-[#4f6ef7]">
+                 <Cpu className="w-4 h-4" />
+                 <span className="text-[11px] font-bold">AI FLOW ASSISTANT</span>
+               </div>
+               <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
             </div>
-            <div className="flex items-center gap-2">
-              {state === 'analyzing' && (
-                <div className="flex items-center gap-1 text-[9px] text-[#f7c84f]">
-                  <Loader2 className="w-2.5 h-2.5 animate-spin" />
-                  Analyzing
-                </div>
-              )}
-              {state === 'applied' && (
-                <div className="flex items-center gap-1 text-[9px] text-[#4faa6f]">
-                  <Check className="w-2.5 h-2.5" />
-                  Applied
-                </div>
-              )}
-              {state === 'ready' && (
-                <div className="w-1.5 h-1.5 rounded-full bg-[#4faa6f] animate-pulse" />
-              )}
-              {state === 'idle' && (
-                <div className="w-1.5 h-1.5 rounded-full bg-[#333]" />
-              )}
+            
+            <div className="p-3 space-y-4">
+               {/* Dica 1: Silêncios */}
+               <div className="space-y-2">
+                  <p className="text-[10px] text-[#ccc] leading-relaxed">
+                    <span className="text-yellow-500 mr-1">●</span>
+                    Detected long pauses between 00:01:20 and 00:01:45. Removing them will improve pacing.
+                  </p>
+                  <button onClick={() => { applyAutoCut(); setIsOpen(false); }} className="px-3 py-1.5 bg-yellow-500/10 border border-yellow-500/30 text-yellow-500 text-[9px] uppercase tracking-wider rounded hover:bg-yellow-500/20 transition-colors">
+                    Remove Silences
+                  </button>
+               </div>
+               
+               <div className="w-full h-px bg-[#222]" />
+               
+               {/* Dica 2: Fillers */}
+               <div className="space-y-2">
+                  <p className="text-[10px] text-[#ccc] leading-relaxed">
+                    <span className="text-emerald-500 mr-1">●</span>
+                    Found 8 filler words (uh, né, tipo). Removing them reduces 12s from the final cut.
+                  </p>
+                  <button className="px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/30 text-emerald-500 text-[9px] uppercase tracking-wider rounded hover:bg-emerald-500/20 transition-colors">
+                    Remove Fillers
+                  </button>
+               </div>
+               
+               <div className="w-full h-px bg-[#222]" />
+               
+               {/* Dica 3: Engajamento */}
+               <div className="space-y-2">
+                  <p className="text-[10px] text-[#ccc] leading-relaxed">
+                    <span className="text-blue-500 mr-1">●</span>
+                    Segment at 00:02:10 has low engagement markers. Consider applying an engaging B-Roll.
+                  </p>
+                  <button className="w-full py-1.5 bg-[#1a1a20] border border-[#333] text-[#888] text-[9px] uppercase tracking-wider rounded hover:bg-[#222] hover:text-[#eee] transition-colors">
+                    Re-Analyze Project
+                  </button>
+               </div>
             </div>
-          </div>
-
-          {/* Suggestions */}
-          <div className="max-h-[240px] overflow-y-auto">
-            {suggestions.map((sug) => {
-              const colors = SEVERITY_COLORS[sug.severity];
-              return (
-                <div
-                  key={sug.id}
-                  className={`px-3 py-2.5 border-b border-[#141418] ${sug.applied ? 'opacity-40' : ''}`}
-                >
-                  <div className="flex items-start gap-2 mb-2">
-                    <div className={`w-1.5 h-1.5 rounded-full mt-1 flex-shrink-0 ${colors.dot}`} />
-                    <p className="text-[10px] text-[#666] leading-relaxed">{sug.message}</p>
-                  </div>
-                  {!sug.applied ? (
-                    <button
-                      onClick={() => handleAction(sug)}
-                      disabled={state === 'analyzing'}
-                      className={`ml-3.5 text-[9px] uppercase tracking-wider px-2 py-0.5 border rounded transition-all
-                        ${colors.border} ${colors.text} hover:bg-white/5 disabled:opacity-30`}
-                    >
-                      {sug.action}
-                    </button>
-                  ) : (
-                    <div className="ml-3.5 flex items-center gap-1 text-[9px] text-[#333]">
-                      <Check className="w-2.5 h-2.5" />
-                      Applied
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-
-          {/* Applied log */}
-          {appliedLog.length > 0 && (
-            <div className="border-t border-[#141418] px-3 py-2">
-              <p className="text-[9px] uppercase tracking-widest text-[#222] mb-1.5">History</p>
-              {appliedLog.slice(0, 3).map((entry, i) => (
-                <p key={i} className="text-[9px] text-[#2a2a35] leading-relaxed">{entry}</p>
-              ))}
-            </div>
-          )}
-
-          {/* Re-analyze button */}
-          <div className="px-3 py-2 border-t border-[#141418]">
-            <button
-              onClick={analyze}
-              disabled={state === 'analyzing'}
-              className="w-full py-1.5 text-[9px] uppercase tracking-widest text-[#333] hover:text-[#4f6ef7] border border-[#1a1a20] hover:border-[#4f6ef7]/30 rounded transition-all disabled:opacity-30"
-            >
-              Re-analyze project
-            </button>
-          </div>
-        </div>
+         </div>
       )}
 
-      {/* Dock button */}
+      {/* ── O BOTÃO COM O MASCOTE E A ROTAÇÃO NEON ── */}
       <button
-        onClick={() => setExpanded(!expanded)}
-        className={`flex items-center gap-2 px-3 py-2 rounded-sm border transition-all shadow-[0_4px_20px_rgba(0,0,0,0.6)]
-          ${expanded
-            ? 'bg-[#0d0d10] border-[#4f6ef7]/40 text-[#4f6ef7]'
-            : 'bg-[#0d0d10] border-[#1e1e28] text-[#444] hover:text-[#888] hover:border-[#2a2a35]'
-          }`}
+        onClick={() => setIsOpen(!isOpen)}
+        className="flex items-center gap-3 bg-[#111115] border border-[#222] rounded-full pl-1 pr-4 py-1 hover:border-[#444] transition-colors shadow-lg group"
       >
-        <Cpu className="w-3.5 h-3.5" />
-        <span className="text-[10px] uppercase tracking-widest">Copilot</span>
-        {suggestions.filter(s => !s.applied).length > 0 && (
-          <span className="w-4 h-4 rounded-full bg-[#4f6ef7]/20 border border-[#4f6ef7]/40 text-[#4f6ef7] text-[8px] flex items-center justify-center">
-            {suggestions.filter(s => !s.applied).length}
-          </span>
-        )}
-        {expanded ? <ChevronDown className="w-3 h-3" /> : <ChevronUp className="w-3 h-3" />}
+        <div className="relative w-10 h-10 rounded-full flex items-center justify-center bg-[#0a0a0c]">
+           {/* Mascote */}
+           <img src="/vertical2.jpg" alt="Mascot" className="w-8 h-8 rounded-full object-cover z-10" />
+           {/* Anel de fundo */}
+           <div className="absolute inset-0 rounded-full border border-red-500/30 shadow-[0_0_10px_rgba(239,68,68,0.5)]" />
+           {/* Bolinha vermelha rodando (Radar) */}
+           <div className="absolute w-10 h-10 animate-[spin_3s_linear_infinite] z-20">
+              <div className="w-2 h-2 bg-red-500 rounded-full absolute -top-1 left-1/2 -translate-x-1/2 shadow-[0_0_5px_rgba(239,68,68,1)]" />
+           </div>
+        </div>
+
+        <div className="flex flex-col items-start">
+           <span className="text-[11px] font-bold text-[#eee] tracking-widest group-hover:text-white transition-colors">FLOW ASSISTANT</span>
+        </div>
+        
+        <div className="w-5 h-5 bg-[#222] rounded-full flex items-center justify-center ml-2">
+           <span className="text-[9px] text-[#aaa]">3</span>
+        </div>
+        
+        {isOpen ? <ChevronDown className="w-4 h-4 text-[#888]" /> : <ChevronUp className="w-4 h-4 text-[#888]" />}
       </button>
     </div>
   );

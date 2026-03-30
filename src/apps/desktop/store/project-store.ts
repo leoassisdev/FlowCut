@@ -7,9 +7,9 @@ import { create } from 'zustand';
 import type {
   VideoProject, PipelineState, StylePreset,
   ProcessingJob, CaptionStyle, SourceVideo, Transcript,
-  SemanticTimeline, TimelineCut,
+  SemanticTimeline, TimelineCut, CaptionTrack, CaptionBlock
 } from '@/packages/shared-types';
-import { MOCK_PROJECT, MOCK_BROLL_CUES, MOCK_CAPTION_TRACK } from '@/apps/desktop/mocks/mock-data';
+import { MOCK_PROJECT, MOCK_BROLL_CUES } from '@/apps/desktop/mocks/mock-data';
 import { getVideoMetadata, extractAudio, generateProxy, generateThumbnails, detectSilences } from '@/apps/desktop/services/tauri-bridge';
 import { transcribeAudio, checkEngineHealth } from '@/apps/desktop/services/local-api-client';
 import {
@@ -101,15 +101,21 @@ interface ProjectStore {
   autosave: AutosaveState; markDirty: () => void; saveNow: (label?: string) => void; restoreFromSnapshot: (snapshotId: string) => void;
   loadProject: (id: string) => void;
   importVideoFromPath: (filePath: string) => Promise<void>;
+  
   removeWord: (wordId: string) => void;
   toggleWordRemoval: (wordId: string) => void;
+  editWordText: (wordId: string, newText: string) => void;
   removeSegment: (segmentId: string) => void;
+  
   rebuildTimeline: () => Promise<void>;
   applyAutoCut: () => Promise<void>;
   applyPreset: (preset: StylePreset) => void;
   setState: (state: PipelineState) => void;
+  
   generateCaptions: () => void;
-  updateCaptionStyle: (style: CaptionStyle) => void;
+  updateCaptionBlock: (blockId: string, newText: string) => void;
+  updateCaptionStyle: (style: Partial<CaptionStyle> & Record<string, any>) => void;
+  
   generateBrollCues: () => void;
   enqueueJob: (type: ProcessingJob['type']) => string; cancelJob: (id: string) => void; retryJob: (id: string) => void; simulateExport: () => void;
 }
@@ -306,20 +312,30 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     if (found) { set({ project: newProject as any }); get().markDirty(); }
   },
 
+  editWordText: (wordId: string, newText: string) => {
+    const project = get().project; if (!project?.transcript) return;
+    const newProject = structuredClone(project);
+    let found = false;
+    for (const seg of newProject.transcript.segments) {
+      const w = seg.words.find(w => w.id === wordId);
+      if (w) { w.word = newText; found = true; break; }
+    }
+    if (found) { set({ project: newProject as any }); get().markDirty(); }
+  },
+
   removeSegment: (segmentId: string) => {
     const project = get().project; if (!project?.transcript) return;
     const seg = project.transcript.segments.find((s) => s.id === segmentId);
     get().executeCommand(createRemoveSegmentCommand(segmentId, seg?.text ?? ''));
   },
 
-  // ─── REBUILD: Reconstrói timeline baseada nas palavras riscadas ───
   rebuildTimeline: async () => {
     const project = get().project;
     if (!project?.transcript || !project.semanticTimeline) return;
 
     set({ isRebuilding: true, rebuildProgress: 0 });
-
     const originalDurationMs = project.sourceVideo?.durationMs ?? project.semanticTimeline.originalDurationMs;
+    
     const allWords = project.transcript.segments.flatMap(s => s.words).filter(w => !w.isRemoved);
     
     if (allWords.length === 0) {
@@ -337,7 +353,6 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     let totalDurationMs = 0;
     let cutIndex = 0;
 
-    // Agrupa palavras consecutivas em cortes (gap > 300ms = novo corte)
     for (let i = 1; i < allWords.length; i++) {
       const w = allWords[i];
       const gap = w.startMs - currentCutEnd;
@@ -346,6 +361,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         const label = currentLabel.length > 40 ? currentLabel.slice(0, 40) + '…' : currentLabel;
         newCuts.push({ id: `cut-rebuild-${cutIndex++}`, startMs: currentCutStart, endMs: currentCutEnd, type: 'keep', sourceSegmentId: 'rebuild', label } as TimelineCut);
         totalDurationMs += (currentCutEnd - currentCutStart);
+
         currentCutStart = w.startMs;
         currentCutEnd = w.endMs;
         currentLabel = w.word;
@@ -370,32 +386,29 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         semanticTimeline: { ...project.semanticTimeline, cuts: newCuts, totalDurationMs, originalDurationMs },
       },
     });
+
     get().markDirty();
     set({ isRebuilding: false, rebuildProgress: 100 });
     setTimeout(() => set({ rebuildProgress: 0 }), 300);
   },
 
-  // ─── AUTO-CUT: Noise gate real via FFmpeg silencedetect ───
   applyAutoCut: async () => {
     const project = get().project;
     if (!project?.semanticTimeline || !project.sourceVideo) return;
-
     const filePath = project.sourceVideo.filePath;
     if (!filePath) return;
 
     set({ isRebuilding: true, rebuildProgress: 10 });
-
+    
     const noiseDb = get().silenceNoiseDb;
     const minDuration = get().silenceMinDuration;
     const videoDurationMs = project.sourceVideo.durationMs;
     const originalDurationMs = project.semanticTimeline.originalDurationMs || videoDurationMs;
     const existingCuts = project.semanticTimeline.cuts;
 
-    // Chama o Rust que roda ffmpeg silencedetect no arquivo original
     const result = await detectSilences(filePath, noiseDb, minDuration);
 
     if (!result || result.silences.length === 0) {
-      // Nenhum silêncio detectado — mantém os cortes como estão
       set({ isRebuilding: false, rebuildProgress: 100 });
       setTimeout(() => set({ rebuildProgress: 0 }), 300);
       return;
@@ -403,25 +416,21 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
     set({ rebuildProgress: 60 });
 
-    // Para cada corte existente, remove os trechos de silêncio que caem dentro dele
     const newCuts: TimelineCut[] = [];
     let cutIndex = 0;
     let totalKeptMs = 0;
 
     for (const cut of existingCuts) {
-      // Encontra silêncios que se sobrepõem a este corte
       const overlappingSilences = result.silences.filter(
         s => s.start_ms < cut.endMs && s.end_ms > cut.startMs
       );
 
       if (overlappingSilences.length === 0) {
-        // Nenhum silêncio neste corte — mantém inteiro
         newCuts.push({ ...cut, id: `cut-ac-${cutIndex++}` });
         totalKeptMs += (cut.endMs - cut.startMs);
         continue;
       }
 
-      // Percorre o corte e pula os silêncios
       let cursor = cut.startMs;
 
       for (const silence of overlappingSilences) {
@@ -429,7 +438,6 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         const silEnd = Math.min(silence.end_ms, cut.endMs);
 
         if (cursor < silStart) {
-          // Trecho de fala antes do silêncio
           newCuts.push({
             id: `cut-ac-${cutIndex++}`,
             startMs: cursor,
@@ -443,7 +451,6 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         cursor = silEnd;
       }
 
-      // Trecho de fala depois do último silêncio
       if (cursor < cut.endMs) {
         newCuts.push({
           id: `cut-ac-${cutIndex++}`,
@@ -463,6 +470,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         semanticTimeline: { ...project.semanticTimeline, cuts: newCuts, totalDurationMs: totalKeptMs, originalDurationMs },
       },
     });
+
     get().markDirty();
     set({ isRebuilding: false, rebuildProgress: 100 });
     setTimeout(() => set({ rebuildProgress: 0 }), 300);
@@ -470,8 +478,66 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
   applyPreset: (preset: StylePreset) => { const project = get().project; if (!project) return; get().executeCommand(createApplyPresetCommand(preset, project.appliedPreset)); },
   setState: (state: PipelineState) => { const project = get().project; if (!project) return; set({ project: { ...project, state } as any }); },
-  generateCaptions: () => { const project = get().project; if (!project) return; get().executeCommand(createUpdateCaptionsCommand(MOCK_CAPTION_TRACK, project.captionTrack)); },
-  updateCaptionStyle: (style: CaptionStyle) => { const project = get().project; if (!project?.captionTrack) return; get().executeCommand(createUpdateCaptionStyleCommand(style, project.captionTrack.style)); },
+  
+  generateCaptions: () => { 
+    const project = get().project; 
+    if (!project?.transcript) return;
+    
+    const blocks: CaptionBlock[] = [];
+    project.transcript.segments.forEach((seg, i) => {
+      const activeWords = seg.words.filter(w => !w.isRemoved);
+      if (activeWords.length > 0) {
+        blocks.push({
+          id: `caption-${i}`,
+          startMs: activeWords[0].startMs,
+          endMs: activeWords[activeWords.length - 1].endMs,
+          text: activeWords.map(w => w.word).join(' '),
+        });
+      }
+    });
+
+    const captionTrack: CaptionTrack = {
+      id: `track-${Date.now()}`,
+      style: project.captionTrack?.style || {
+        fontFamily: 'Montserrat',
+        fontSize: 28, // Padrão menor pro preview
+        color: '#FFFFFF',
+        backgroundColor: '#000000',
+        alignment: 'center',
+        position: 'bottom',
+        isDynamic: false,
+        isVisible: true,
+        bgEnabled: true,
+        xAxis: 50,
+        yAxis: 85,
+      } as any,
+      blocks,
+    };
+
+    set({ project: { ...project, captionTrack } as any });
+    get().markDirty();
+  },
+
+  updateCaptionBlock: (blockId: string, newText: string) => {
+    const project = get().project;
+    if (!project?.captionTrack) return;
+    
+    const blocks = project.captionTrack.blocks.map(b => 
+      b.id === blockId ? { ...b, text: newText } : b
+    );
+    
+    set({ project: { ...project, captionTrack: { ...project.captionTrack, blocks } } as any });
+    get().markDirty();
+  },
+
+  updateCaptionStyle: (style: Partial<CaptionStyle> & Record<string, any>) => { 
+    const project = get().project; 
+    if (!project?.captionTrack) return; 
+    const newStyle = { ...project.captionTrack.style, ...style };
+    set({ project: { ...project, captionTrack: { ...project.captionTrack, style: newStyle } } as any });
+    get().markDirty();
+  },
+  
   generateBrollCues: () => { const project = get().project; if (!project) return; set({ project: { ...project, state: 'BROLL_READY', brollCues: MOCK_BROLL_CUES } as any }); get().markDirty(); },
   enqueueJob: (type: ProcessingJob['type']) => enqueueJob(type), cancelJob: (id: string) => cancelJob(id), retryJob: (id: string) => retryJob(id),
   simulateExport: () => { const project = get().project; if (!project) return; set({ project: { ...project, state: 'EXPORTING' } as any }); enqueueJob('export', 'Export video'); },

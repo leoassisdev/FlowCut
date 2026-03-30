@@ -12,10 +12,10 @@ export default function PreviewPlayer({ sourceVideo }: Props) {
   const [progress, setProgress] = useState(0);
   const [currentMs, setCurrentMs] = useState(0);
   const [isMuted, setIsMuted] = useState(false);
-  const [playbackRate, setPlaybackRate] = useState(1);
   const [videoSrc, setVideoSrc] = useState<string | null>(null);
   
   const videoRef = useRef<HTMLVideoElement>(null);
+  const videoContainerRef = useRef<HTMLDivElement>(null);
   const scrubRef = useRef<HTMLDivElement>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const gainNodeRef = useRef<GainNode | null>(null);
@@ -30,9 +30,15 @@ export default function PreviewPlayer({ sourceVideo }: Props) {
   const setCurrentPlaybackMs = useProjectStore(s => s.setCurrentPlaybackMs);
   const seekRequestMs = useProjectStore(s => s.seekRequestMs);
   const requestSeek = useProjectStore(s => s.requestSeek);
+  const updateCaptionStyle = useProjectStore(s => s.updateCaptionStyle);
 
   const cuts = project?.semanticTimeline?.cuts || [];
   const totalMs = sourceVideo?.durationMs || 1;
+  
+  const captionTrack = project?.captionTrack;
+  const captionStyle = captionTrack?.style as any;
+  const isCaptionVisible = captionStyle?.isVisible ?? true;
+  const activeCaption = isCaptionVisible ? captionTrack?.blocks.find(b => currentMs >= b.startMs && currentMs <= b.endMs) : null;
 
   useEffect(() => {
     if (!sourceVideo?.proxyPath) { setVideoSrc(null); return; }
@@ -40,7 +46,6 @@ export default function PreviewPlayer({ sourceVideo }: Props) {
     else { setVideoSrc(sourceVideo.proxyPath); }
   }, [sourceVideo?.proxyPath]);
 
-  // Cria a Placa de Som (Web Audio API)
   useEffect(() => {
     if (!videoRef.current || !videoSrc) return;
     try {
@@ -57,10 +62,9 @@ export default function PreviewPlayer({ sourceVideo }: Props) {
         gainNodeRef.current = gainNode; analyserRef.current = analyser; dataArrayRef.current = new Uint8Array(analyser.frequencyBinCount);
         vid._audioConnected = true;
       }
-    } catch (e) { console.warn("AudioContext bloqueado ou falhou", e); }
+    } catch (e) { console.warn("AudioContext bloqueado", e); }
   }, [videoSrc]);
 
-  // Ouve os pulos da Agulha
   useEffect(() => {
     if (seekRequestMs !== null && videoRef.current) {
       videoRef.current.currentTime = seekRequestMs / 1000;
@@ -71,34 +75,16 @@ export default function PreviewPlayer({ sourceVideo }: Props) {
     }
   }, [seekRequestMs, setCurrentPlaybackMs, totalMs]);
 
-  // Sincroniza Play/Pause com o Cérebro (Shift+Space)
   useEffect(() => {
     if (!videoRef.current) return;
     if (isPlaying && videoRef.current.paused) {
-      if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
-        audioCtxRef.current.resume();
-      }
+      if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') audioCtxRef.current.resume();
       videoRef.current.play().catch(console.warn);
     } else if (!isPlaying && !videoRef.current.paused) {
       videoRef.current.pause();
     }
   }, [isPlaying]);
 
-  // Atalho Local (Barra de Espaço solta)
-  useEffect(() => {
-    const handleGlobalKeyDown = (e: KeyboardEvent) => {
-      const activeTag = document.activeElement?.tagName;
-      if (activeTag === 'INPUT' || activeTag === 'TEXTAREA') return;
-      if (e.code === 'Space' && !e.shiftKey) { 
-        e.preventDefault(); 
-        setIsPlaying(!useProjectStore.getState().isPlaying); 
-      }
-    };
-    window.addEventListener('keydown', handleGlobalKeyDown);
-    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
-  }, []);
-
-  // Update Loop (60fps)
   useEffect(() => {
     let animationFrameId: number;
     const updateProgress = () => {
@@ -160,10 +146,34 @@ export default function PreviewPlayer({ sourceVideo }: Props) {
     setCurrentPlaybackMs(clickedMs);
   }, [totalMs, setCurrentPlaybackMs]);
 
-  const togglePlay = () => {
-    setIsPlaying(!isPlaying);
+  const handleCaptionMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault(); e.stopPropagation();
+    if (!videoContainerRef.current) return;
+    
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startPosX = captionStyle?.xAxis ?? 50;
+    const startPosY = captionStyle?.yAxis ?? 80;
+    const rect = videoContainerRef.current.getBoundingClientRect();
+
+    const onMouseMove = (moveEvent: MouseEvent) => {
+      const deltaX = moveEvent.clientX - startX;
+      const deltaY = moveEvent.clientY - startY;
+      const newX = Math.max(0, Math.min(100, startPosX + (deltaX / rect.width) * 100));
+      const newY = Math.max(0, Math.min(100, startPosY + (deltaY / rect.height) * 100));
+      updateCaptionStyle({ xAxis: newX, yAxis: newY });
+    };
+
+    const onMouseUp = () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
   };
 
+  const togglePlay = () => setIsPlaying(!isPlaying);
   const stopPlayback = () => {
     if (!videoRef.current) return;
     videoRef.current.pause(); videoRef.current.currentTime = 0;
@@ -178,13 +188,14 @@ export default function PreviewPlayer({ sourceVideo }: Props) {
   return (
     <div className="flex-1 flex flex-col bg-[#0a0a0c] overflow-hidden">
       <div className="flex-1 flex items-center justify-center relative bg-[#070708] min-h-0">
-        <div className="relative w-full h-full max-h-full max-w-[90%] aspect-video bg-[#0d0d10] border border-[#1a1a20] rounded-sm overflow-hidden shadow-[0_0_60px_rgba(0,0,0,0.8)]">
+        <div ref={videoContainerRef} className="relative w-full h-full max-h-full max-w-[90%] aspect-video bg-[#0d0d10] border border-[#1a1a20] rounded-sm overflow-hidden shadow-[0_0_60px_rgba(0,0,0,0.8)]">
           {isRebuilding && (
             <div className="absolute inset-0 z-50 bg-black/80 flex flex-col items-center justify-center backdrop-blur-sm">
               <span className="text-white mb-3 font-mono tracking-widest text-sm">APLICANDO CORTES... {rebuildProgress}%</span>
               <div className="w-64 h-2 bg-gray-800 rounded-full overflow-hidden"><div className="h-full bg-primary transition-all duration-75" style={{ width: `${rebuildProgress}%` }} /></div>
             </div>
           )}
+          
           {videoSrc ? (
             <video ref={videoRef} src={videoSrc} className="absolute inset-0 w-full h-full object-contain" crossOrigin="anonymous" onEnded={() => { setIsPlaying(false); stopPlayback(); }} />
           ) : (
@@ -193,7 +204,32 @@ export default function PreviewPlayer({ sourceVideo }: Props) {
               <p className="text-[10px] font-mono text-[#222228] tracking-widest">NENHUM VÍDEO CARREGADO</p>
             </div>
           )}
+          
           <div className="absolute top-2 left-3"><span className="font-mono text-[11px] text-[#4f6ef7]/60 tracking-widest bg-black/40 px-1.5 py-0.5 rounded-sm">{formatMs(currentMs)}</span></div>
+
+          {activeCaption && (
+            <div 
+              onMouseDown={handleCaptionMouseDown}
+              className="absolute whitespace-pre-wrap cursor-move hover:ring-2 hover:ring-primary/50 transition-shadow"
+              style={{
+                left: `${captionStyle?.xAxis ?? 50}%`,
+                top: `${captionStyle?.yAxis ?? 80}%`,
+                transform: 'translate(-50%, -50%)',
+                color: captionStyle?.color ?? '#FFFFFF',
+                backgroundColor: captionStyle?.bgEnabled ? (captionStyle?.backgroundColor ?? 'rgba(0,0,0,0.6)') : 'transparent',
+                fontFamily: captionStyle?.fontFamily ?? 'Montserrat',
+                fontSize: `${captionStyle?.fontSize ?? 24}px`,
+                textAlign: captionStyle?.alignment ?? 'center',
+                padding: '4px 12px',
+                borderRadius: '6px',
+                textShadow: captionStyle?.bgEnabled ? 'none' : '1px 1px 3px rgba(0,0,0,0.8)',
+                zIndex: 40,
+                maxWidth: '90%',
+              }}
+            >
+              {activeCaption.text}
+            </div>
+          )}
         </div>
       </div>
 
@@ -204,21 +240,19 @@ export default function PreviewPlayer({ sourceVideo }: Props) {
         </div>
 
         <div className="h-10 flex items-center px-3 gap-1">
-          <button className="w-7 h-7 flex items-center justify-center text-[#333] hover:text-[#888] transition-colors" title="Skip to start" onClick={() => requestSeek(0)}><SkipBack className="w-3.5 h-3.5" /></button>
-          <button className="w-8 h-8 flex items-center justify-center rounded bg-[#4f6ef7]/10 border border-[#4f6ef7]/20 text-[#4f6ef7] hover:bg-[#4f6ef7]/20 transition-all" onClick={togglePlay} title={isPlaying ? 'Pause (Space)' : 'Play (Space)'}>{isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 ml-0.5" />}</button>
-          <button className="w-7 h-7 flex items-center justify-center text-[#333] hover:text-[#ef4444] transition-colors" title="Stop" onClick={stopPlayback}><Square className="w-3.5 h-3.5 fill-current" /></button>
-          <button className="w-7 h-7 flex items-center justify-center text-[#333] hover:text-[#888] transition-colors" title="Skip to end" onClick={() => requestSeek(totalMs)}><SkipForward className="w-3.5 h-3.5" /></button>
+          <button className="w-7 h-7 flex items-center justify-center text-[#333] hover:text-[#888] transition-colors" onClick={() => requestSeek(0)}><SkipBack className="w-3.5 h-3.5" /></button>
+          <button className="w-8 h-8 flex items-center justify-center rounded bg-[#4f6ef7]/10 border border-[#4f6ef7]/20 text-[#4f6ef7] hover:bg-[#4f6ef7]/20 transition-all" onClick={togglePlay}>{isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 ml-0.5" />}</button>
+          <button className="w-7 h-7 flex items-center justify-center text-[#333] hover:text-[#ef4444] transition-colors" onClick={stopPlayback}><Square className="w-3.5 h-3.5 fill-current" /></button>
+          <button className="w-7 h-7 flex items-center justify-center text-[#333] hover:text-[#888] transition-colors" onClick={() => requestSeek(totalMs)}><SkipForward className="w-3.5 h-3.5" /></button>
 
           <div className="ml-2 flex items-center gap-1">
-            <span className="font-mono text-[11px] text-[#aaa] tracking-wider">{formatMs(currentMs)}</span>
-            <span className="font-mono text-[11px] text-[#333]">/</span>
-            <span className="font-mono text-[11px] text-[#333] tracking-wider">{formatDuration(totalMs)}</span>
+            <span className="font-mono text-[11px] text-[#aaa] tracking-wider">{formatMs(currentMs)}</span><span className="font-mono text-[11px] text-[#333]">/</span><span className="font-mono text-[11px] text-[#333] tracking-wider">{formatDuration(totalMs)}</span>
           </div>
           <div className="flex-1" />
-          <button className={`w-7 h-7 flex items-center justify-center transition-colors ${isMuted ? 'text-destructive/80 hover:text-destructive' : 'text-[#333] hover:text-[#888]'}`} title="Mute" onClick={() => setIsMuted(!isMuted)}>
+          <button className={`w-7 h-7 flex items-center justify-center transition-colors ${isMuted ? 'text-destructive/80 hover:text-destructive' : 'text-[#333] hover:text-[#888]'}`} onClick={() => setIsMuted(!isMuted)}>
             {isMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
           </button>
-          <button className="w-7 h-7 flex items-center justify-center text-[#333] hover:text-[#888] transition-colors" title="Fullscreen" onClick={() => videoRef.current?.requestFullscreen()}><Maximize2 className="w-3.5 h-3.5" /></button>
+          <button className="w-7 h-7 flex items-center justify-center text-[#333] hover:text-[#888] transition-colors" onClick={() => videoRef.current?.requestFullscreen()}><Maximize2 className="w-3.5 h-3.5" /></button>
         </div>
       </div>
     </div>
