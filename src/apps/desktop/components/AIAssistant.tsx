@@ -5,6 +5,7 @@ import { useProjectStore } from '../store/project-store';
 export default function AIAssistant() {
   const [isOpen, setIsOpen] = useState(false);
   const applyAutoCut = useProjectStore(s => s.applyAutoCut);
+  const removeFillers = useProjectStore(s => s.removeFillers);
 
   return (
     <div className="fixed bottom-6 left-16 z-50 flex flex-col items-start">
@@ -37,9 +38,7 @@ export default function AIAssistant() {
                     <span className="text-emerald-500 mr-1">●</span>
                     Encontradas 8 palavras de preenchimento (ééé, hum, tipo). O corte poupará 12s.
                   </p>
-                  <button className="px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/30 text-emerald-500 text-[9px] uppercase tracking-wider rounded hover:bg-emerald-500/20 transition-colors">
-                    Remover Vícios
-                  </button>
+                  <button onClick={() => { removeFillers(); setIsOpen(false); }} className="px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/30 text-emerald-500 text-[9px] uppercase tracking-wider rounded hover:bg-emerald-500/20 transition-colors">Remover Vícios</button>
                </div>
                
                <div className="w-full h-px bg-[#222]" />

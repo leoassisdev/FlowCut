@@ -1,4 +1,4 @@
-import { ArrowLeft, Settings, Download, Subtitles, Image, RefreshCw } from 'lucide-react';
+import { ArrowLeft, Settings, Download, Subtitles, Image } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { useProjectStore } from '@/apps/desktop/store/project-store';
@@ -13,7 +13,7 @@ interface Props {
 
 export default function EditorToolbar({ project, onNavigateHome }: Props) {
   const navigate = useNavigate();
-  const { generateCaptions, generateBrollCues, rebuildTimeline, editorMachine } = useProjectStore();
+  const { generateCaptions, generateBrollCues, editorMachine } = useProjectStore();
   
   return (
     <div className="h-12 border-b border-[#1c1c20] bg-[#0a0a0c] flex items-center px-4 gap-2 select-none">
@@ -36,14 +36,6 @@ export default function EditorToolbar({ project, onNavigateHome }: Props) {
       {/* ─── ZONA CENTRO-ESQUERDA (Edição e Cortes) ─── */}
       <SaveIndicator />
       
-      <Button 
-        variant="ghost" 
-        size="sm" 
-        className="h-7 gap-1.5 text-xs text-[#ccc] hover:text-white hover:bg-[#1a1a24] transition-colors" 
-        onClick={rebuildTimeline}
-      >
-        <RefreshCw className="w-3 h-3" /> Aplicar
-      </Button>
 
       {/* ─── ESPAÇADOR FLEX ─── */}
       <div className="flex-1" />

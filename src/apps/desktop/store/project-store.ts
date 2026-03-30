@@ -109,6 +109,9 @@ interface ProjectStore {
   
   rebuildTimeline: () => Promise<void>;
   applyAutoCut: () => Promise<void>;
+  removeFillers: () => void;
+
+
   applyPreset: (preset: StylePreset) => void;
   setState: (state: PipelineState) => void;
   
@@ -328,7 +331,15 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       const w = seg.words.find(w => w.id === wordId);
       if (w) { w.isRemoved = !w.isRemoved; found = true; break; }
     }
-    if (found) { set({ project: newProject as any }); get().markDirty(); }
+    if (found) {
+      set({ project: newProject as any });
+      get().markDirty();
+      // Auto-rebuild timeline com debounce
+      clearTimeout((window as any).__rebuildDebounce);
+      (window as any).__rebuildDebounce = setTimeout(() => {
+        get().rebuildTimeline();
+      }, 400);
+    }
   },
 
   editWordText: (wordId: string, newText: string) => {
@@ -467,6 +478,58 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     setTimeout(() => set({ rebuildProgress: 0 }), 300);
   },
 
+
+  removeFillers: () => {
+    const project = get().project;
+    if (!project?.transcript) return;
+
+    const FILLER_WORDS_PT = [
+      'é', 'eh', 'éh', 'hum', 'uh', 'ah', 'ahm', 'uhm', 'hmm', 'hm', 'um',
+      'tipo', 'né', 'ne', 'então', 'entao', 'assim', 'basicamente',
+      'literalmente', 'enfim', 'bom', 'ahn', 'eeh',
+      'tá', 'ta', 'daí', 'dai', 'sabe', 'viu', 'né', 'mano',
+    ];
+
+    const SILENCE_GAP_MS = 200;
+    const newProject = structuredClone(project);
+    let removedCount = 0;
+
+    // Coleta todas as palavras em ordem com referencia ao segmento
+    const allWords: any[] = [];
+    for (const seg of newProject.transcript.segments) {
+      for (const w of seg.words) {
+        allWords.push(w);
+      }
+    }
+
+    for (let i = 0; i < allWords.length; i++) {
+      const w = allWords[i];
+      if (w.isRemoved) continue;
+      const normalized = w.word.toLowerCase().replace(/[.,!?]/g, '').trim();
+      const isFiller = w.isFillerWord || FILLER_WORDS_PT.includes(normalized);
+      if (!isFiller) continue;
+
+      // Verifica contexto: silencio ANTES ou DEPOIS da palavra
+      const prevWord = i > 0 ? allWords[i - 1] : null;
+      const nextWord = i < allWords.length - 1 ? allWords[i + 1] : null;
+
+      const gapBefore = prevWord ? (w.startMs - prevWord.endMs) : 9999;
+      const gapAfter = nextWord ? (nextWord.startMs - w.endMs) : 9999;
+
+      // So remove se tiver silencio antes OU depois (contexto de enrolacao)
+      if (gapBefore >= SILENCE_GAP_MS || gapAfter >= SILENCE_GAP_MS) {
+        w.isRemoved = true;
+        removedCount++;
+      }
+    }
+
+    if (removedCount > 0) {
+      set({ project: newProject as any });
+      get().markDirty();
+      // Rebuild timeline automaticamente
+      get().rebuildTimeline();
+    }
+  },
   applyPreset: (preset: StylePreset) => { const project = get().project; if (!project) return; get().executeCommand(createApplyPresetCommand(preset, project.appliedPreset)); },
   setState: (state: PipelineState) => { const project = get().project; if (!project) return; set({ project: { ...project, state } as any }); },
   
