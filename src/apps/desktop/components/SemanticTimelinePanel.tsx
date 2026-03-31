@@ -221,9 +221,12 @@ export default function SemanticTimelinePanel() {
       return;
     }
 
+    const pct = getPctFromMouseEvent(e);
+    const timeMs = pct * totalDuration;
+    requestSeek(timeMs);
+
     if (activeTool === 'blade') {
-      const pct = getPctFromMouseEvent(e);
-      splitCut(pct * totalDuration);
+      splitCut(timeMs);
       setActiveTool('selection');
       setSelectedCutIds([]);
       setSelectedCutId(null);
@@ -446,9 +449,12 @@ export default function SemanticTimelinePanel() {
                         return;
                       }
 
+                      const pct = getPctFromMouseEvent(e);
+                      const timeMs = pct * totalDuration;
+                      requestSeek(timeMs);
+
                       if (activeTool === 'blade') {
-                        const pct = getPctFromMouseEvent(e);
-                        splitCut(pct * totalDuration);
+                        splitCut(timeMs);
                         setActiveTool('selection');
                         setSelectedCutIds([]);
                         setSelectedCutId(null);
